@@ -41,10 +41,22 @@ const lines = readFileSync(file, 'utf8')
 const entries: Entry[] = [];
 const failures: string[] = [];
 
+/** Три base64url-сегмента через точку — так выглядит JWT от Wildberries. */
+const JWT_RE = /^ey[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+
 for (const [index, line] of lines.entries()) {
-    const match = /^([A-Za-z0-9_-]{1,24})\s*=\s*(.+)$/.exec(line);
-    const name = match ? match[1]!.toLowerCase() : null;
-    const token = (match ? match[2]! : line).trim();
+    const match = /^([A-Za-z0-9_-]{1,32})\s*=\s*(.*)$/.exec(line);
+    const rawName = match ? match[1]! : null;
+    const token = (match ? match[2]! : line).trim().replace(/^['"]|['"]$/g, '');
+
+    // Файл может быть целым .env — молча пропускаем всё, что не токен.
+    if (!JWT_RE.test(token)) continue;
+
+    // WB_TOKEN1, WB_TOKEN_MAIN → имя без служебного префикса.
+    const name = rawName
+        ? rawName.replace(/^WB_TOKEN_?/i, '').toLowerCase() || null
+        : null;
+
     try {
         entries.push({ name, info: parseToken(token), token });
     } catch (e) {
