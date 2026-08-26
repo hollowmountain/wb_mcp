@@ -57,6 +57,41 @@ const API_TABLE: Array<{ host: string; category: string; limit: string; used: st
     }
 ];
 
+/**
+ * Человеческие названия действий. Заодно видно, какие из них вообще
+ * не привязаны к кабинету: вход авторизует человека целиком.
+ */
+const ACTION_LABELS: Record<string, string> = {
+    'oauth.login': 'вход в коннектор',
+    'oauth.token.issued': 'выдан доступ',
+    'panel.login': 'вход в панель',
+    'draft.create.feedback': 'черновик ответа на отзыв',
+    'draft.create.feedback_edit': 'черновик правки ответа',
+    'draft.create.question': 'черновик ответа на вопрос',
+    'draft.create.chat': 'черновик сообщения в чат',
+    'draft.send.feedback': 'ОТПРАВЛЕН ответ на отзыв',
+    'draft.send.feedback_edit': 'ОТПРАВЛЕНА правка ответа',
+    'draft.send.question': 'ОТПРАВЛЕН ответ на вопрос',
+    'draft.send.chat': 'ОТПРАВЛЕНО сообщение в чат',
+    'draft.discard': 'черновик отменён',
+    'question.reject': 'вопрос отклонён',
+    'question.viewed': 'вопрос отмечен просмотренным'
+};
+
+/** Действия, которые по своей природе не относятся к кабинету. */
+const CABINET_AGNOSTIC = new Set(['oauth.login', 'oauth.token.issued', 'panel.login']);
+
+function actionCell(action: string): string {
+    const label = ACTION_LABELS[action];
+    return label ? escapeHtml(label) : `<code>${escapeHtml(action)}</code>`;
+}
+
+function cabinetCell(action: string, cabinet: string | null): string {
+    if (cabinet) return escapeHtml(cabinet);
+    if (CABINET_AGNOSTIC.has(action)) return '<span class="muted">не относится</span>';
+    return '<span class="muted">—</span>';
+}
+
 function badge(text: string, tone: 'ok' | 'warn' | 'bad' | 'mute'): string {
     return `<span class="badge ${tone}">${escapeHtml(text)}</span>`;
 }
@@ -131,8 +166,8 @@ export function renderPanel(data: PanelData): string {
     const auditRows = data.audit
         .map(
             a => `<tr><td class="muted">${ts(a.ts)}</td><td>${escapeHtml(a.actor)}</td>
-                  <td><code>${escapeHtml(a.action)}</code></td>
-                  <td>${escapeHtml(a.cabinet ?? '—')}</td>
+                  <td>${actionCell(a.action)}</td>
+                  <td>${cabinetCell(a.action, a.cabinet)}</td>
                   <td>${a.outcome === 'ok' ? badge('ok', 'ok') : a.outcome === 'denied' ? badge('отказ', 'warn') : badge('ошибка', 'bad')}</td></tr>`
         )
         .join('');
@@ -228,6 +263,7 @@ export function renderPanel(data: PanelData): string {
   <tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Кабинет</th><th>Итог</th></tr>
   ${auditRows || '<tr><td colspan="5" class="muted">Записей нет</td></tr>'}
 </table></div>
+<p class="muted">Вход в коннектор и в панель авторизует человека целиком, поэтому кабинет у таких записей не указывается.</p>
 
 <h2>Подключение</h2>
 <p>Адрес MCP для Claude: <code>${escapeHtml(config.resourceUrl.href)}</code></p>
