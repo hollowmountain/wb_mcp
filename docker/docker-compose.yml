@@ -1,0 +1,38 @@
+services:
+    mcp-wb:
+        build:
+            context: ..
+            dockerfile: docker/Dockerfile
+        restart: unless-stopped
+        env_file: ../.env
+        environment:
+            # Внутри контейнера слушаем все интерфейсы: наружу торчит только Caddy.
+            HOST: 0.0.0.0
+            PORT: 3000
+            DB_PATH: /data/mcp-wb.db
+        volumes:
+            - mcp-wb-data:/data
+        expose:
+            - '3000'
+
+    caddy:
+        image: caddy:2-alpine
+        restart: unless-stopped
+        depends_on:
+            - mcp-wb
+        ports:
+            - '80:80'
+            - '443:443'
+        environment:
+            # Домен и почта для Let's Encrypt берутся из того же .env
+            MCP_DOMAIN: ${MCP_DOMAIN}
+            ACME_EMAIL: ${ACME_EMAIL}
+        volumes:
+            - ./Caddyfile:/etc/caddy/Caddyfile:ro
+            - caddy-data:/data
+            - caddy-config:/config
+
+volumes:
+    mcp-wb-data:
+    caddy-data:
+    caddy-config:

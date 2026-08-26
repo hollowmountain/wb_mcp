@@ -1,0 +1,30 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$MCP_DOMAIN} {
+	encode zstd gzip
+
+	# Anthropic ходит на /mcp и на оба well-known-документа; остальное — страницы входа.
+	reverse_proxy mcp-wb:3000 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+		# Ответ на tools/call может ждать WB до минуты.
+		transport http {
+			read_timeout 120s
+			write_timeout 120s
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}
