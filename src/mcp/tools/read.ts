@@ -21,6 +21,7 @@ import {
 } from '../../wb/api.js';
 import { formatChat, formatChatEvent, formatFeedback, formatQuestion, joinBlocks } from '../format.js';
 import { guarded, text, toUnixSeconds, type ToolResult } from './common.js';
+import { locateFeedback, locateQuestion } from './resolve.js';
 
 const chatCursorKey = (slug: string): string => `chat.events.cursor.${slug}`;
 
@@ -37,7 +38,9 @@ const cabinetArg = z
 const cabinetRequiredArg = z
     .string()
     .optional()
-    .describe('Идентификатор кабинета Wildberries. Обязателен, если кабинетов настроено больше одного.');
+    .describe(
+        'Идентификатор кабинета Wildberries. Если не указан, кабинет определяется по идентификатору обращения.'
+    );
 
 /** Заголовок блока кабинета. При единственном кабинете не засоряем вывод. */
 function heading(cabinet: Cabinet): string {
@@ -172,8 +175,8 @@ export function registerReadTools(server: McpServer): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('wb_feedback_get', async args => {
-            const cabinet = config.cabinets.resolve(args.cabinet);
-            return text(heading(cabinet) + formatFeedback(await getFeedback(cabinet, args.id)));
+            const { cabinet, item } = await locateFeedback(args.cabinet, args.id);
+            return text(heading(cabinet) + formatFeedback(item));
         })
     );
 
@@ -272,8 +275,8 @@ export function registerReadTools(server: McpServer): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('wb_question_get', async args => {
-            const cabinet = config.cabinets.resolve(args.cabinet);
-            return text(heading(cabinet) + formatQuestion(await getQuestion(cabinet, args.id)));
+            const { cabinet, item } = await locateQuestion(args.cabinet, args.id);
+            return text(heading(cabinet) + formatQuestion(item));
         })
     );
 

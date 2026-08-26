@@ -3,6 +3,7 @@ import { actorFromAuthInfo, type Actor } from '../../auth/provider.js';
 import { DraftError } from '../../drafts.js';
 import { logger } from '../../logger.js';
 import { WbApiError } from '../../wb/client.js';
+import { CabinetError } from '../../wb/cabinets.js';
 
 export interface CallExtra {
     authInfo?: AuthInfo;
@@ -36,7 +37,7 @@ export function guarded<A>(name: string, handler: (args: A, extra: CallExtra) =>
                 logger.warn({ tool: name, status: e.status, path: e.path }, 'wb error in tool');
                 return fail(e.toUserMessage());
             }
-            if (e instanceof DraftError) return fail(e.message);
+            if (e instanceof DraftError || e instanceof CabinetError) return fail(e.message);
             logger.error({ tool: name, err: e }, 'tool failed');
             return fail(`Инструмент ${name} завершился ошибкой: ${e instanceof Error ? e.message : String(e)}`);
         }

@@ -14,8 +14,9 @@ import {
     sendQuestionRejection,
     type DraftStatus
 } from '../../drafts.js';
-import { getFeedback, getQuestion, listChats, markQuestionViewed } from '../../wb/api.js';
+import { markQuestionViewed } from '../../wb/api.js';
 import { actorOf, fail, guarded, text } from './common.js';
+import { locateChat, locateFeedback, locateQuestion } from './resolve.js';
 
 const CONFIRM_PHRASE = 'ОТПРАВИТЬ';
 
@@ -26,7 +27,9 @@ const CONFIRM_PHRASE = 'ОТПРАВИТЬ';
 const cabinetArg = z
     .string()
     .optional()
-    .describe('Идентификатор кабинета Wildberries. Обязателен, если кабинетов больше одного. Список — в wb_cabinets.');
+    .describe(
+        'Идентификатор кабинета Wildberries. Если не указан, кабинет определяется по идентификатору обращения. Список кабинетов — в wb_cabinets.'
+    );
 
 export function registerWriteTools(server: McpServer): void {
     // ─── Создание черновиков ────────────────────────────────────────────────
@@ -46,8 +49,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_draft_feedback_reply', async (args, extra) => {
             const actor = actorOf(extra);
-            const cabinet = config.cabinets.resolve(args.cabinet);
-            const feedback = await getFeedback(cabinet, args.feedbackId);
+            const { cabinet, item: feedback } = await locateFeedback(args.cabinet, args.feedbackId);
 
             if (feedback.answer?.text) {
                 return fail(
@@ -86,8 +88,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_draft_feedback_answer_edit', async (args, extra) => {
             const actor = actorOf(extra);
-            const cabinet = config.cabinets.resolve(args.cabinet);
-            const feedback = await getFeedback(cabinet, args.feedbackId);
+            const { cabinet, item: feedback } = await locateFeedback(args.cabinet, args.feedbackId);
 
             if (!feedback.answer?.text) {
                 return fail(`У отзыва ${args.feedbackId} ещё нет ответа — используйте wb_draft_feedback_reply.`);
@@ -128,8 +129,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_draft_question_answer', async (args, extra) => {
             const actor = actorOf(extra);
-            const cabinet = config.cabinets.resolve(args.cabinet);
-            const question = await getQuestion(cabinet, args.questionId);
+            const { cabinet, item: question } = await locateQuestion(args.cabinet, args.questionId);
 
             const draft = createDraft({
                 cabinet,
@@ -164,15 +164,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_draft_chat_message', async (args, extra) => {
             const actor = actorOf(extra);
-            const cabinet = config.cabinets.resolve(args.cabinet);
-            const chats = await listChats(cabinet);
-            const chat = chats.find(c => c.chatID === args.chatId);
-
-            if (!chat) {
-                return fail(
-                    `Чат ${args.chatId} не найден в кабинете «${cabinet.label}». Проверьте ID и кабинет через wb_chats_list.`
-                );
-            }
+            const { cabinet, item: chat } = await locateChat(args.cabinet, args.chatId);
 
             const draft = createDraft({
                 cabinet,
@@ -271,7 +263,7 @@ export function registerWriteTools(server: McpServer): void {
             if (args.confirm !== CONFIRM_PHRASE) {
                 return fail(`Отклонение не выполнено: confirm должен быть ровно "${CONFIRM_PHRASE}".`);
             }
-            const cabinet = config.cabinets.resolve(args.cabinet);
+            const { cabinet } = await locateQuestion(args.cabinet, args.questionId);
             await sendQuestionRejection(cabinet, args.questionId, args.reason, actorOf(extra));
             return text(`Вопрос ${args.questionId} отклонён в кабинете «${cabinet.label}».`);
         })
@@ -287,7 +279,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_question_mark_viewed', async (args, extra) => {
             const actor = actorOf(extra);
-            const cabinet = config.cabinets.resolve(args.cabinet);
+            const { cabinet } = await locateQuestion(args.cabinet, args.questionId);
             assertCanSend(cabinet, actor, 'question.viewed', args.questionId);
             await markQuestionViewed(cabinet, args.questionId);
             audit({
