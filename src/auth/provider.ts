@@ -266,8 +266,12 @@ export const wbOAuthProvider: OAuthServerProvider = {
         // Ротация: старый refresh-токен больше не действует (OAuth 2.1 для публичных клиентов).
         db.prepare('UPDATE tokens SET revoked = 1 WHERE token_hash = ?').run(hash);
 
-        const requested = scopes && scopes.length > 0 ? scopes : row.scopes.split(' ').filter(Boolean);
-        const granted = grantedScopes(row.user_email, requested).filter(s => row.scopes.split(' ').includes(s));
+        // Разрешения пересчитываем от текущей роли, а не пересекаем с прежней выдачей:
+        // роль хранится у нас, а не приходит от клиента, поэтому повышение прав
+        // (сотруднику разрешили отвечать) должно доехать при первом же обновлении
+        // токена, а понижение — отобрать доступ так же быстро.
+        const requested = scopes && scopes.length > 0 ? scopes : SUPPORTED_SCOPES;
+        const granted = grantedScopes(row.user_email, requested);
 
         return issueTokens({
             clientId: client.client_id,
