@@ -1,0 +1,7 @@
+# Скрипты и конфиги едут на Linux — переводы строк только LF,
+# независимо от core.autocrlf на машине разработчика.
+* text=auto eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+Caddyfile text eol=lf
+*.png binary
