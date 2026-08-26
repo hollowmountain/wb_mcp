@@ -10,7 +10,9 @@ import type { VerifiedIdentity } from '../auth/identity/types.js';
 import { deniedPage, errorPage } from '../auth/pages.js';
 
 const COOKIE_NAME = 'mcpwb_panel';
-const SESSION_TTL_SECONDS = 12 * 60 * 60;
+// 12 часов означали новый вход каждый день; для панели, которую открывают
+// походя, это слишком часто. Право доступа всё равно проверяется на каждом запросе.
+const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 export interface PanelSession {
     email: string;

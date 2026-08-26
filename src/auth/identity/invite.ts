@@ -7,6 +7,8 @@ interface InviteRow {
     code: string;
     email: string;
     cabinets: string | null;
+    max_uses: number;
+    used_count: number;
     used_at: number | null;
 }
 
@@ -38,20 +40,23 @@ export const inviteIdentity: IdentityProvider = {
                 return;
             }
 
-            const row = db.prepare('SELECT code, email, cabinets, used_at FROM invites WHERE code = ?').get(code) as
-                | InviteRow
-                | undefined;
+            const row = db
+                .prepare('SELECT code, email, cabinets, max_uses, used_count, used_at FROM invites WHERE code = ?')
+                .get(code) as InviteRow | undefined;
 
             if (!row) {
                 res.status(400).send(invitePage(pendingId, 'Код не найден.'));
                 return;
             }
-            if (row.used_at !== null) {
-                res.status(400).send(invitePage(pendingId, 'Этот код уже использован. Запросите новый.'));
+            // max_uses = 0 — код без ограничения по числу входов.
+            if (row.max_uses > 0 && row.used_count >= row.max_uses) {
+                res.status(400).send(
+                    invitePage(pendingId, `Код исчерпан: по нему уже вошли ${row.used_count} раз(а). Запросите новый.`)
+                );
                 return;
             }
 
-            db.prepare('UPDATE invites SET used_at = ? WHERE code = ?').run(now(), code);
+            db.prepare('UPDATE invites SET used_at = ?, used_count = used_count + 1 WHERE code = ?').run(now(), code);
 
             const scope = (row.cabinets ?? '')
                 .split(',')

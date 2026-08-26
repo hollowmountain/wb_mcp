@@ -100,7 +100,11 @@ CREATE TABLE IF NOT EXISTS invites (
   email      TEXT NOT NULL,
   -- Какие кабинеты откроет этот код. Пусто — все.
   cabinets   TEXT,
+  -- Сколько раз кодом можно войти. 0 — без ограничения.
+  max_uses   INTEGER NOT NULL DEFAULT 1,
+  used_count INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
+  -- Когда входили в последний раз.
   used_at    INTEGER
 );
 
@@ -123,6 +127,8 @@ function addColumnIfMissing(table: string, column: string, definition: string): 
 addColumnIfMissing('pending_auth', 'purpose', "TEXT NOT NULL DEFAULT 'oauth'");
 addColumnIfMissing('users', 'cabinets', 'TEXT');
 addColumnIfMissing('invites', 'cabinets', 'TEXT');
+addColumnIfMissing('invites', 'max_uses', 'INTEGER NOT NULL DEFAULT 1');
+addColumnIfMissing('invites', 'used_count', 'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('drafts', 'cabinet', "TEXT NOT NULL DEFAULT 'main'");
 addColumnIfMissing('audit', 'cabinet', 'TEXT');
 
