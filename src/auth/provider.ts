@@ -15,7 +15,7 @@ import { db, hashToken, newId, now } from '../db/index.js';
 import { logger } from '../logger.js';
 import { identity } from './identity/index.js';
 import type { VerifiedIdentity } from './identity/types.js';
-import { deniedPage, errorPage } from './pages.js';
+import { deniedPage, errorPage, PENDING_TTL_SECONDS } from './pages.js';
 
 export const SCOPE_READ = 'wb:read';
 export const SCOPE_WRITE = 'wb:write';
@@ -180,7 +180,7 @@ export const wbOAuthProvider: OAuthServerProvider = {
     },
 
     async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
-        const pendingId = newId(24);
+        const pendingId = `oauth_${newId(24)}`;
         db.prepare(
             `INSERT INTO pending_auth (id, client_id, redirect_uri, client_state, code_challenge, scopes, resource, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -325,8 +325,10 @@ export async function completeAuthorization(
     }
     db.prepare('DELETE FROM pending_auth WHERE id = ?').run(pendingId);
 
-    if (pending.created_at < now() - 900) {
-        res.status(400).send(errorPage('Сессия входа истекла', 'С момента начала входа прошло больше 15 минут.'));
+    if (pending.created_at < now() - PENDING_TTL_SECONDS) {
+        res.status(400).send(
+            errorPage('Страница входа устарела', 'Начните подключение коннектора в Claude заново — код при этом не расходуется.')
+        );
         return;
     }
 

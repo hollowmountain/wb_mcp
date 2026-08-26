@@ -152,6 +152,7 @@ export function kvSet(key: string, value: string): void {
 export function cleanupExpired(): void {
     const t = now();
     db.prepare('DELETE FROM auth_codes WHERE expires_at < ?').run(t);
-    db.prepare('DELETE FROM pending_auth WHERE created_at < ?').run(t - 900);
+    // Согласовано с PENDING_TTL_SECONDS: 30 минут плюс запас.
+    db.prepare('DELETE FROM pending_auth WHERE created_at < ?').run(t - 40 * 60);
     db.prepare('DELETE FROM tokens WHERE expires_at < ?').run(t - 86400);
 }

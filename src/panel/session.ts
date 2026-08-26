@@ -7,9 +7,11 @@ import { db, newId, now } from '../db/index.js';
 import { cabinetScopeOf } from '../auth/provider.js';
 import { identity } from '../auth/identity/index.js';
 import type { VerifiedIdentity } from '../auth/identity/types.js';
-import { deniedPage, errorPage } from '../auth/pages.js';
+import { deniedPage, expiredPanelPage, PENDING_TTL_SECONDS } from '../auth/pages.js';
 
 const COOKIE_NAME = 'mcpwb_panel';
+/** Префикс идентификатора заявки на вход в панель. */
+const PANEL_PREFIX = 'panel_';
 // 12 часов означали новый вход каждый день; для панели, которую открывают
 // походя, это слишком часто. Право доступа всё равно проверяется на каждом запросе.
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
@@ -81,7 +83,7 @@ interface PendingRow {
  * помечая назначение: провайдер личности у них общий.
  */
 export function beginPanelLogin(res: Response): void {
-    const pendingId = newId(24);
+    const pendingId = PANEL_PREFIX + newId(24);
     db.prepare(
         `INSERT INTO pending_auth (id, purpose, client_id, redirect_uri, client_state, code_challenge, scopes, resource, created_at)
          VALUES (?, 'panel', 'panel', '/panel', NULL, 'panel', '', NULL, ?)`
@@ -90,11 +92,17 @@ export function beginPanelLogin(res: Response): void {
     void identity.begin(pendingId, res);
 }
 
-export function purposeOfPending(pendingId: string): string | null {
+/**
+ * Заявка живёт ограниченное время, а форма входа может провисеть дольше.
+ * Чтобы после её истечения показать правильную подсказку, назначение
+ * зашито в сам идентификатор.
+ */
+export function purposeOfPending(pendingId: string): string {
     const row = db.prepare('SELECT purpose FROM pending_auth WHERE id = ?').get(pendingId) as
         | Pick<PendingRow, 'purpose'>
         | undefined;
-    return row?.purpose ?? null;
+    if (row) return row.purpose;
+    return pendingId.startsWith(PANEL_PREFIX) ? 'panel' : 'oauth';
 }
 
 export async function completePanelLogin(
@@ -107,13 +115,13 @@ export async function completePanelLogin(
         | undefined;
 
     if (!row) {
-        res.status(400).send(errorPage('Сессия входа истекла', 'Откройте панель заново.'));
+        res.status(400).send(expiredPanelPage());
         return;
     }
     db.prepare('DELETE FROM pending_auth WHERE id = ?').run(pendingId);
 
-    if (row.created_at < now() - 900) {
-        res.status(400).send(errorPage('Сессия входа истекла', 'С момента начала входа прошло больше 15 минут.'));
+    if (row.created_at < now() - PENDING_TTL_SECONDS) {
+        res.status(400).send(expiredPanelPage());
         return;
     }
 

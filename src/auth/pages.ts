@@ -37,6 +37,20 @@ function shell(title: string, body: string): string {
 </html>`;
 }
 
+/** Сколько живёт заявка на вход. Форма входа вполне может провисеть дольше. */
+export const PENDING_TTL_SECONDS = 30 * 60;
+
+/** Истёкший вход в панель: не тупик, а кнопка «войти заново». */
+export function expiredPanelPage(): string {
+    return shell(
+        'Страница входа устарела',
+        `<h1>Страница входа устарела</h1>
+         <p>С момента открытия формы прошло слишком много времени. Это не значит, что код неверный —
+            просто нужно начать вход заново.</p>
+         <p><a href="/panel/login"><button type="button">Войти в панель</button></a></p>`
+    );
+}
+
 export function errorPage(title: string, detail: string): string {
     return shell(title, `<h1>${escapeHtml(title)}</h1><p class="err">${escapeHtml(detail)}</p>`);
 }
