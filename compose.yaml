@@ -1,10 +1,13 @@
+# Лежит в корне не для красоты: docker compose берёт переменные для подстановки
+# (${MCP_DOMAIN}, ${ACME_EMAIL}) из .env РЯДОМ С COMPOSE-ФАЙЛОМ. Если унести его
+# в docker/, Caddy получит пустой домен и не выпустит сертификат.
 services:
     mcp-wb:
         build:
-            context: ..
+            context: .
             dockerfile: docker/Dockerfile
         restart: unless-stopped
-        env_file: ../.env
+        env_file: .env
         environment:
             # Внутри контейнера слушаем все интерфейсы: наружу торчит только Caddy.
             HOST: 0.0.0.0
@@ -28,7 +31,7 @@ services:
             MCP_DOMAIN: ${MCP_DOMAIN}
             ACME_EMAIL: ${ACME_EMAIL}
         volumes:
-            - ./Caddyfile:/etc/caddy/Caddyfile:ro
+            - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
             - caddy-data:/data
             - caddy-config:/config
 

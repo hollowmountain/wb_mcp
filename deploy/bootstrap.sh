@@ -122,6 +122,6 @@ say "Готово"
 cat <<'NEXT'
     Дальше:
       1. заполнить /opt/mcp-wb/.env
-      2. cd /opt/mcp-wb && docker compose -f docker/docker-compose.yml up -d --build
+      2. cd /opt/mcp-wb && docker compose up -d --build
       3. curl https://<домен>/.well-known/oauth-protected-resource/mcp
 NEXT

@@ -95,13 +95,13 @@ https://mcp-wb.вашдомен.ru/idp/yandex/callback
 **Без внешнего IdP** (`IDENTITY_PROVIDER=invite`) — выдавайте одноразовые коды:
 
 ```bash
-docker compose -f docker/docker-compose.yml exec mcp-wb node dist/scripts/invite.js ivan@вашдомен.ru
+docker compose exec mcp-wb node dist/scripts/invite.js ivan@вашдомен.ru
 ```
 
 ### 4. Запуск
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build
+docker compose up -d --build
 ```
 
 Caddy сам получит сертификат Let's Encrypt. Проверка:
@@ -131,7 +131,7 @@ curl https://mcp-wb.вашдомен.ru/.well-known/oauth-protected-resource/mcp
 **Журнал действий.** Всё, что ушло покупателю, лежит в таблице `audit` файла базы:
 
 ```bash
-docker compose -f docker/docker-compose.yml exec mcp-wb \
+docker compose exec mcp-wb \
   node -e "const d=require('better-sqlite3')('/data/mcp-wb.db');console.table(d.prepare('SELECT datetime(ts,\"unixepoch\") t,actor,action,target,outcome FROM audit ORDER BY ts DESC LIMIT 30').all())"
 ```
 
