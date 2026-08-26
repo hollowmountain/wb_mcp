@@ -10,13 +10,15 @@ export type AuditOutcome = 'ok' | 'denied' | 'error';
 export function audit(entry: {
     actor: string;
     action: string;
+    cabinet?: string;
     target?: string;
     detail?: unknown;
     outcome: AuditOutcome;
 }): void {
     const detail = entry.detail === undefined ? null : JSON.stringify(entry.detail);
-    db.prepare('INSERT INTO audit (ts, actor, action, target, detail, outcome) VALUES (?, ?, ?, ?, ?, ?)').run(
+    db.prepare('INSERT INTO audit (ts, cabinet, actor, action, target, detail, outcome) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
         now(),
+        entry.cabinet ?? null,
         entry.actor,
         entry.action,
         entry.target ?? null,
@@ -27,7 +29,9 @@ export function audit(entry: {
 }
 
 export function recentAudit(limit = 50): Array<Record<string, unknown>> {
-    return db.prepare('SELECT ts, actor, action, target, detail, outcome FROM audit ORDER BY ts DESC LIMIT ?').all(limit) as Array<
+    return db
+        .prepare('SELECT ts, cabinet, actor, action, target, detail, outcome FROM audit ORDER BY ts DESC LIMIT ?')
+        .all(limit) as Array<
         Record<string, unknown>
     >;
 }

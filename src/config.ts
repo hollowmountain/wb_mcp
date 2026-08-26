@@ -1,5 +1,6 @@
 import { config as loadEnv } from 'dotenv';
 import { z } from 'zod';
+import { buildCabinet, CabinetRegistry, type Cabinet } from './wb/cabinets.js';
 
 loadEnv();
 
@@ -14,7 +15,8 @@ const schema = z.object({
     PORT: z.coerce.number().int().positive().default(3000),
     HOST: z.string().default('127.0.0.1'),
 
-    WB_TOKEN: z.string().min(1, 'WB_TOKEN обязателен: персональный токен из ЛК продавца'),
+    WB_TOKEN: z.string().default(''),
+    WB_CABINETS: z.string().default(''),
     WB_SANDBOX: z
         .string()
         .default('false')
@@ -69,6 +71,41 @@ if (allowedDomains.length === 0 && allowedEmails.length === 0 && env.IDENTITY_PR
     );
 }
 
+
+/**
+ * Кабинеты задаются так:
+ *   WB_CABINETS=main,opt
+ *   WB_LABEL_MAIN=Основной кабинет
+ *   WB_TOKEN_MAIN=eyJ...
+ *   WB_TOKEN_OPT=eyJ...
+ *
+ * Для совместимости одиночный WB_TOKEN превращается в кабинет `main`.
+ */
+function buildRegistry(): CabinetRegistry {
+    const slugs = csv(env.WB_CABINETS);
+    const cabinets: Cabinet[] = [];
+
+    if (slugs.length === 0) {
+        if (!env.WB_TOKEN) {
+            throw new Error(
+                'Не настроен ни один кабинет Wildberries. Задайте WB_CABINETS и WB_TOKEN_<SLUG>, либо одиночный WB_TOKEN.'
+            );
+        }
+        cabinets.push(buildCabinet('main', 'Кабинет Wildberries', env.WB_TOKEN));
+        return new CabinetRegistry(cabinets);
+    }
+
+    for (const slug of slugs) {
+        const key = slug.toUpperCase().replaceAll('-', '_');
+        const token = process.env[`WB_TOKEN_${key}`]?.trim();
+        if (!token) {
+            throw new Error(`Кабинет «${slug}» объявлен в WB_CABINETS, но переменная WB_TOKEN_${key} пуста`);
+        }
+        cabinets.push(buildCabinet(slug, process.env[`WB_LABEL_${key}`]?.trim() ?? '', token));
+    }
+    return new CabinetRegistry(cabinets);
+}
+
 export const config = {
     publicUrl,
     issuerUrl: publicUrl,
@@ -77,9 +114,9 @@ export const config = {
     host: env.HOST,
 
     wb: {
-        token: env.WB_TOKEN,
         sandbox: env.WB_SANDBOX
     },
+    cabinets: buildRegistry(),
 
     identityProvider: env.IDENTITY_PROVIDER,
     google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET },

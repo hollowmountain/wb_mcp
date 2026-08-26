@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- Черновик ответа клиенту. Ничего не уходит в WB, пока статус не станет 'sent'.
 CREATE TABLE IF NOT EXISTS drafts (
   id          TEXT PRIMARY KEY,
+  cabinet     TEXT NOT NULL DEFAULT 'main',
   kind        TEXT NOT NULL CHECK (kind IN ('feedback','feedback_edit','question','chat')),
   target_id   TEXT NOT NULL,
   target_note TEXT,
@@ -82,6 +83,7 @@ CREATE INDEX IF NOT EXISTS drafts_status ON drafts (status, created_at);
 CREATE TABLE IF NOT EXISTS audit (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
   ts      INTEGER NOT NULL,
+  cabinet TEXT,
   actor   TEXT NOT NULL,
   action  TEXT NOT NULL,
   target  TEXT,
@@ -102,6 +104,19 @@ CREATE TABLE IF NOT EXISTS kv (
   value TEXT NOT NULL
 );
 `);
+
+/**
+ * Добавляет колонку, если её ещё нет. Нужно для баз, созданных до появления
+ * поддержки нескольких кабинетов: у них в drafts и audit нет колонки cabinet.
+ */
+function addColumnIfMissing(table: string, column: string, definition: string): void {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some(c => c.name === column)) return;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+addColumnIfMissing('drafts', 'cabinet', "TEXT NOT NULL DEFAULT 'main'");
+addColumnIfMissing('audit', 'cabinet', 'TEXT');
 
 export const now = (): number => Math.floor(Date.now() / 1000);
 export const newId = (bytes = 32): string => randomBytes(bytes).toString('base64url');

@@ -1,6 +1,7 @@
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { TokenBucket, sleep } from './ratelimit.js';
+import type { Cabinet } from './cabinets.js';
+import { sleep } from './ratelimit.js';
 
 /**
  * Категории WB API. У каждой свой хост, своя категория токена и свои лимиты.
@@ -21,14 +22,8 @@ const HOSTS: Record<WbCategory, { prod: string; sandbox: string | null }> = {
     returns: { prod: 'https://returns-api.wildberries.ru', sandbox: null }
 };
 
-// feedbacks: 3 запроса в секунду, всплеск 6.
-// chat: 10 запросов за 10 секунд, всплеск 10.
-// returns: 20 запросов в минуту, всплеск 10.
-const BUCKETS: Record<WbCategory, TokenBucket> = {
-    feedbacks: new TokenBucket(6, 3),
-    chat: new TokenBucket(10, 1),
-    returns: new TokenBucket(10, 20 / 60)
-};
+// Вёдра лимитов живут в самом кабинете: лимиты WB считаются на аккаунт
+// продавца, поэтому у каждого кабинета они свои.
 
 export class WbApiError extends Error {
     constructor(
@@ -61,6 +56,7 @@ export class WbApiError extends Error {
 }
 
 interface RequestOptions {
+    cabinet: Cabinet;
     category: WbCategory;
     path: string;
     method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
@@ -93,13 +89,13 @@ async function request<T>(opts: RequestOptions): Promise<T> {
         if (v !== undefined) url.searchParams.set(k, String(v));
     }
 
-    const bucket = BUCKETS[opts.category];
+    const bucket = opts.cabinet.buckets[opts.category];
     let lastError: WbApiError | undefined;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
         await bucket.take(1);
 
-        const headers: Record<string, string> = { Authorization: config.wb.token };
+        const headers: Record<string, string> = { Authorization: opts.cabinet.token };
         let body: string | FormData | undefined;
         if (opts.json !== undefined) {
             headers['Content-Type'] = 'application/json';
@@ -132,7 +128,14 @@ async function request<T>(opts: RequestOptions): Promise<T> {
         }
 
         logger.debug(
-            { wb: true, category: opts.category, path: opts.path, status: res.status, ms: Date.now() - started },
+            {
+                wb: true,
+                cabinet: opts.cabinet.slug,
+                category: opts.category,
+                path: opts.path,
+                status: res.status,
+                ms: Date.now() - started
+            },
             'wb request'
         );
 
@@ -196,8 +199,8 @@ interface ChatEnvelope<T> {
     errors: string[] | null;
 }
 
-export async function wbFeedbacks<T>(opts: Omit<RequestOptions, 'category'>): Promise<T> {
-    const res = await request<FeedbackEnvelope<T>>({ ...opts, category: 'feedbacks' });
+export async function wbFeedbacks<T>(cabinet: Cabinet, opts: Omit<RequestOptions, 'category' | 'cabinet'>): Promise<T> {
+    const res = await request<FeedbackEnvelope<T>>({ ...opts, cabinet, category: 'feedbacks' });
     if (res === undefined) return undefined as T;
     if (res.error) {
         throw new WbApiError(res.errorText || 'WB вернул error=true', 400, 'feedbacks', opts.path, res.additionalErrors);
@@ -205,8 +208,8 @@ export async function wbFeedbacks<T>(opts: Omit<RequestOptions, 'category'>): Pr
     return res.data;
 }
 
-export async function wbChat<T>(opts: Omit<RequestOptions, 'category'>): Promise<T> {
-    const res = await request<ChatEnvelope<T>>({ ...opts, category: 'chat' });
+export async function wbChat<T>(cabinet: Cabinet, opts: Omit<RequestOptions, 'category' | 'cabinet'>): Promise<T> {
+    const res = await request<ChatEnvelope<T>>({ ...opts, cabinet, category: 'chat' });
     if (res === undefined) return undefined as T;
     if (res.errors && res.errors.length > 0) {
         throw new WbApiError(res.errors.join('; '), 400, 'chat', opts.path, res.errors);
@@ -214,17 +217,17 @@ export async function wbChat<T>(opts: Omit<RequestOptions, 'category'>): Promise
     return res.result;
 }
 
-export async function wbChatFile(path: string): Promise<ArrayBuffer> {
-    return request<ArrayBuffer>({ category: 'chat', path, raw: true });
+export async function wbChatFile(cabinet: Cabinet, path: string): Promise<ArrayBuffer> {
+    return request<ArrayBuffer>({ cabinet, category: 'chat', path, raw: true });
 }
 
-/** Проверка, что токен вообще принят и нужные категории на месте. */
-export async function wbPing(): Promise<{ feedbacks: boolean; chat: boolean; detail: string[] }> {
+/** Проверка, что токен кабинета принят и нужные категории на месте. */
+export async function wbPing(cabinet: Cabinet): Promise<{ feedbacks: boolean; chat: boolean; detail: string[] }> {
     const detail: string[] = [];
     let feedbacks = false;
     let chat = false;
     try {
-        await wbFeedbacks<{ countUnanswered: number }>({ path: '/api/v1/feedbacks/count-unanswered' });
+        await wbFeedbacks<{ countUnanswered: number }>(cabinet, { path: '/api/v1/feedbacks/count-unanswered' });
         feedbacks = true;
     } catch (e) {
         detail.push(`Вопросы и отзывы: ${e instanceof WbApiError ? e.toUserMessage() : String(e)}`);
@@ -233,7 +236,7 @@ export async function wbPing(): Promise<{ feedbacks: boolean; chat: boolean; det
         detail.push('Чат с покупателями: недоступен в режиме песочницы (у WB нет sandbox-хоста для чата).');
     } else {
         try {
-            await wbChat<unknown>({ path: '/api/v1/seller/chats' });
+            await wbChat<unknown>(cabinet, { path: '/api/v1/seller/chats' });
             chat = true;
         } catch (e) {
             detail.push(`Чат с покупателями: ${e instanceof WbApiError ? e.toUserMessage() : String(e)}`);

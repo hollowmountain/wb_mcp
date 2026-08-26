@@ -111,19 +111,27 @@ const server = app.listen(config.port, config.host, () => {
             publicUrl: config.publicUrl.href,
             mcpUrl: config.resourceUrl.href,
             identityProvider: config.identityProvider,
-            sandbox: config.wb.sandbox
+            sandbox: config.wb.sandbox,
+            cabinets: config.cabinets.slugs()
         },
         'mcp-wb запущен'
     );
 
-    // Проверяем токен WB на старте, чтобы проблема всплыла в логах, а не у пользователя.
-    void wbPing().then(status => {
-        if (status.feedbacks && (status.chat || config.wb.sandbox)) {
-            logger.info({ status }, 'токен WB принят');
-        } else {
-            logger.warn({ status }, 'токен WB работает не полностью');
-        }
-    });
+    for (const warning of config.cabinets.warnings) {
+        logger.warn({ cabinets: true }, warning);
+    }
+
+    // Проверяем токены на старте, чтобы проблема всплыла в логах, а не у пользователя.
+    for (const cabinet of config.cabinets.all()) {
+        void wbPing(cabinet).then(status => {
+            const payload = { cabinet: cabinet.slug, readOnly: cabinet.info.readOnly, status };
+            if (status.feedbacks && (status.chat || config.wb.sandbox)) {
+                logger.info(payload, `кабинет ${cabinet.slug}: токен WB принят`);
+            } else {
+                logger.warn(payload, `кабинет ${cabinet.slug}: токен WB работает не полностью`);
+            }
+        });
+    }
 });
 
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {

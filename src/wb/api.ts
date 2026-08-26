@@ -1,3 +1,4 @@
+import type { Cabinet } from './cabinets.js';
 import { wbChat, wbChatFile, wbFeedbacks } from './client.js';
 
 // ─── Общие типы ──────────────────────────────────────────────────────────────
@@ -68,32 +69,35 @@ export interface FeedbackListParams {
     dateTo?: number;
 }
 
-export const listFeedbacks = (p: FeedbackListParams) =>
-    wbFeedbacks<{ countUnanswered: number; countArchive: number; feedbacks: Feedback[] }>({
+export const listFeedbacks = (cabinet: Cabinet, p: FeedbackListParams) =>
+    wbFeedbacks<{ countUnanswered: number; countArchive: number; feedbacks: Feedback[] }>(cabinet, {
         path: '/api/v1/feedbacks',
         query: { ...p }
     });
 
-export const listArchivedFeedbacks = (p: { take: number; skip: number; nmId?: number; order?: 'dateAsc' | 'dateDesc' }) =>
-    wbFeedbacks<{ feedbacks: Feedback[] }>({ path: '/api/v1/feedbacks/archive', query: { ...p } });
+export const listArchivedFeedbacks = (
+    cabinet: Cabinet,
+    p: { take: number; skip: number; nmId?: number; order?: 'dateAsc' | 'dateDesc' }
+) => wbFeedbacks<{ feedbacks: Feedback[] }>(cabinet, { path: '/api/v1/feedbacks/archive', query: { ...p } });
 
-export const getFeedback = (id: string) => wbFeedbacks<Feedback>({ path: '/api/v1/feedback', query: { id } });
+export const getFeedback = (cabinet: Cabinet, id: string) =>
+    wbFeedbacks<Feedback>(cabinet, { path: '/api/v1/feedback', query: { id } });
 
-export const countUnansweredFeedbacks = () =>
-    wbFeedbacks<{ countUnanswered: number; countUnansweredToday: number }>({
+export const countUnansweredFeedbacks = (cabinet: Cabinet) =>
+    wbFeedbacks<{ countUnanswered: number; countUnansweredToday: number }>(cabinet, {
         path: '/api/v1/feedbacks/count-unanswered'
     });
 
-export const countFeedbacks = (p: { isAnswered: boolean; dateFrom?: number; dateTo?: number }) =>
-    wbFeedbacks<number>({ path: '/api/v1/feedbacks/count', query: { ...p } });
+export const countFeedbacks = (cabinet: Cabinet, p: { isAnswered: boolean; dateFrom?: number; dateTo?: number }) =>
+    wbFeedbacks<number>(cabinet, { path: '/api/v1/feedbacks/count', query: { ...p } });
 
 /** POST /api/v1/feedbacks/answer — ответ уходит на модерацию и затем публикуется. */
-export const answerFeedback = (id: string, text: string) =>
-    wbFeedbacks<void>({ path: '/api/v1/feedbacks/answer', method: 'POST', json: { id, text } });
+export const answerFeedback = (cabinet: Cabinet, id: string, text: string) =>
+    wbFeedbacks<void>(cabinet, { path: '/api/v1/feedbacks/answer', method: 'POST', json: { id, text } });
 
 /** PATCH /api/v1/feedbacks/answer — правка возможна один раз в течение 60 дней. */
-export const editFeedbackAnswer = (id: string, text: string) =>
-    wbFeedbacks<void>({ path: '/api/v1/feedbacks/answer', method: 'PATCH', json: { id, text } });
+export const editFeedbackAnswer = (cabinet: Cabinet, id: string, text: string) =>
+    wbFeedbacks<void>(cabinet, { path: '/api/v1/feedbacks/answer', method: 'PATCH', json: { id, text } });
 
 // ─── Вопросы ─────────────────────────────────────────────────────────────────
 
@@ -118,35 +122,46 @@ export interface QuestionListParams {
     dateTo?: number;
 }
 
-export const listQuestions = (p: QuestionListParams) =>
-    wbFeedbacks<{ countUnanswered: number; countArchive: number; questions: Question[] }>({
+export const listQuestions = (cabinet: Cabinet, p: QuestionListParams) =>
+    wbFeedbacks<{ countUnanswered: number; countArchive: number; questions: Question[] }>(cabinet, {
         path: '/api/v1/questions',
         query: { ...p }
     });
 
-export const getQuestion = (id: string) => wbFeedbacks<Question>({ path: '/api/v1/question', query: { id } });
+export const getQuestion = (cabinet: Cabinet, id: string) =>
+    wbFeedbacks<Question>(cabinet, { path: '/api/v1/question', query: { id } });
 
-export const countUnansweredQuestions = () =>
-    wbFeedbacks<{ countUnanswered: number; countUnansweredToday: number }>({
+export const countUnansweredQuestions = (cabinet: Cabinet) =>
+    wbFeedbacks<{ countUnanswered: number; countUnansweredToday: number }>(cabinet, {
         path: '/api/v1/questions/count-unanswered'
     });
 
-export const countQuestions = (p: { isAnswered: boolean; dateFrom?: number; dateTo?: number }) =>
-    wbFeedbacks<number>({ path: '/api/v1/questions/count', query: { ...p } });
+export const countQuestions = (cabinet: Cabinet, p: { isAnswered: boolean; dateFrom?: number; dateTo?: number }) =>
+    wbFeedbacks<number>(cabinet, { path: '/api/v1/questions/count', query: { ...p } });
 
-export const hasNewFeedbacksOrQuestions = () =>
-    wbFeedbacks<{ hasNewQuestions: boolean; hasNewFeedbacks: boolean }>({ path: '/api/v1/new-feedbacks-questions' });
+export const hasNewFeedbacksOrQuestions = (cabinet: Cabinet) =>
+    wbFeedbacks<{ hasNewQuestions: boolean; hasNewFeedbacks: boolean }>(cabinet, {
+        path: '/api/v1/new-feedbacks-questions'
+    });
 
 /** state=wbRu — опубликовать ответ; правка ответа возможна один раз за 60 дней. */
-export const answerQuestion = (id: string, text: string) =>
-    wbFeedbacks<null>({ path: '/api/v1/questions', method: 'PATCH', json: { id, answer: { text }, state: 'wbRu' } });
+export const answerQuestion = (cabinet: Cabinet, id: string, text: string) =>
+    wbFeedbacks<null>(cabinet, {
+        path: '/api/v1/questions',
+        method: 'PATCH',
+        json: { id, answer: { text }, state: 'wbRu' }
+    });
 
 /** state=none — отклонить вопрос, покупатель ответа не увидит. */
-export const rejectQuestion = (id: string, text: string) =>
-    wbFeedbacks<null>({ path: '/api/v1/questions', method: 'PATCH', json: { id, answer: { text }, state: 'none' } });
+export const rejectQuestion = (cabinet: Cabinet, id: string, text: string) =>
+    wbFeedbacks<null>(cabinet, {
+        path: '/api/v1/questions',
+        method: 'PATCH',
+        json: { id, answer: { text }, state: 'none' }
+    });
 
-export const markQuestionViewed = (id: string) =>
-    wbFeedbacks<null>({ path: '/api/v1/questions', method: 'PATCH', json: { id, wasViewed: true } });
+export const markQuestionViewed = (cabinet: Cabinet, id: string) =>
+    wbFeedbacks<null>(cabinet, { path: '/api/v1/questions', method: 'PATCH', json: { id, wasViewed: true } });
 
 // ─── Чат с покупателями ──────────────────────────────────────────────────────
 
@@ -197,34 +212,36 @@ export interface ChatEvent {
     clientName?: string;
 }
 
-export const listChats = () => wbChat<Chat[]>({ path: '/api/v1/seller/chats' });
+export const listChats = (cabinet: Cabinet) => wbChat<Chat[]>(cabinet, { path: '/api/v1/seller/chats' });
 
 /**
  * Лента событий всех чатов. Пагинация — курсором `next` (Unix-время в мс).
  * Повторять с полученным next, пока totalEvents не станет 0.
  */
-export const listChatEvents = (next?: number) =>
+export const listChatEvents = (cabinet: Cabinet, next?: number) =>
     wbChat<{
         next: number;
         newestEventTime: string;
         oldestEventTime: string;
         totalEvents: number;
         events: ChatEvent[];
-    }>({ path: '/api/v1/seller/events', query: { next } });
+    }>(cabinet, { path: '/api/v1/seller/events', query: { next } });
 
 /** Отправка сообщения покупателю. Обязателен replySign, текст до 1000 символов. */
 export async function sendChatMessage(
+    cabinet: Cabinet,
     replySign: string,
     message: string
 ): Promise<{ addTime: number; chatID: string }> {
     const form = new FormData();
     form.set('replySign', replySign);
     form.set('message', message);
-    return wbChat<{ addTime: number; chatID: string }>({
+    return wbChat<{ addTime: number; chatID: string }>(cabinet, {
         path: '/api/v1/seller/message',
         method: 'POST',
         form
     });
 }
 
-export const downloadChatFile = (downloadId: string) => wbChatFile(`/api/v1/seller/download/${downloadId}`);
+export const downloadChatFile = (cabinet: Cabinet, downloadId: string) =>
+    wbChatFile(cabinet, `/api/v1/seller/download/${downloadId}`);
