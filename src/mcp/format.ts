@@ -13,6 +13,17 @@ function tsFromMillis(value: number | undefined): string {
     return new Date(value).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 }
 
+/**
+ * WB отдаёт цену в goodCard целым числом без указания единиц. По значениям
+ * похоже на копейки, но в документации это не зафиксировано — поэтому
+ * показываем и человекочитаемую сумму, и исходное число для сверки.
+ */
+function price(value: number | undefined, currency: string | undefined): string {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return dash;
+    const major = (value / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `${major} ${currency ?? ''}`.trim() + ` (WB отдаёт ${value})`;
+}
+
 function stars(n: number): string {
     if (!Number.isFinite(n) || n < 1) return dash;
     return '★'.repeat(Math.min(5, n)) + '☆'.repeat(Math.max(0, 5 - n)) + ` (${n})`;
@@ -69,7 +80,7 @@ export function formatChat(c: Chat, index?: number): string {
         `${head}Чат ${c.chatID} ${dash} покупатель: ${c.clientName || 'без имени'}`
     ];
     if (c.goodCard?.nmID) {
-        lines.push(`   Товар: nmId ${c.goodCard.nmID}, ${c.goodCard.price} ${c.goodCard.priceCurrency}, размер ${c.goodCard.size || dash}`);
+        lines.push(`   Товар: nmId ${c.goodCard.nmID}, ${price(c.goodCard.price, c.goodCard.priceCurrency)}, размер ${c.goodCard.size || dash}`);
     }
     if (c.lastMessage) {
         lines.push(`   Последнее сообщение (${tsFromMillis(c.lastMessage.addTimestamp)}): ${c.lastMessage.text}`);
@@ -91,7 +102,7 @@ export function formatChatEvent(e: ChatEvent, index?: number): string {
     for (const img of images) lines.push(`   Изображение: downloadID ${img.downloadID}`);
 
     const card = e.message?.attachments?.goodCard;
-    if (card?.nmID) lines.push(`   Товар в обсуждении: nmId ${card.nmID}, ${card.price} ${card.priceCurrency}`);
+    if (card?.nmID) lines.push(`   Товар в обсуждении: nmId ${card.nmID}, ${price(card.price, card.priceCurrency)}`);
 
     return lines.join('\n');
 }
