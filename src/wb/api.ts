@@ -1,5 +1,5 @@
 import type { Cabinet } from './cabinets.js';
-import { wbChat, wbChatFile, wbFeedbacks } from './client.js';
+import { wbChat, wbChatFile, wbCommon, wbFeedbacks } from './client.js';
 
 // ─── Общие типы ──────────────────────────────────────────────────────────────
 
@@ -24,6 +24,19 @@ export interface PhotoLink {
     fullSize: string;
     miniSize: string;
 }
+
+// ─── Продавец ────────────────────────────────────────────────────────────────
+
+export interface SellerInfo {
+    /** Юридическое лицо: ООО «…», ИП … */
+    name: string;
+    sid: string;
+    tin: string;
+    /** Торговая марка, под которой покупатели видят магазин. */
+    tradeMark: string;
+}
+
+export const getSellerInfo = (cabinet: Cabinet) => wbCommon<SellerInfo>(cabinet, '/api/v1/seller-info');
 
 // ─── Отзывы ──────────────────────────────────────────────────────────────────
 

@@ -1,4 +1,5 @@
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import { pinoHttp } from 'pino-http';
 import { randomUUID } from 'node:crypto';
 
@@ -12,12 +13,15 @@ import { config } from './config.js';
 import { cleanupExpired } from './db/index.js';
 import { logger } from './logger.js';
 import { createMcpServer } from './mcp/server.js';
+import { panelRouter } from './panel/routes.js';
+import { completePanelLogin, purposeOfPending } from './panel/session.js';
 import { wbPing } from './wb/client.js';
 
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
+app.use(cookieParser());
 app.use(
     pinoHttp({
         logger,
@@ -40,7 +44,21 @@ app.use(
 );
 
 // ─── Возврат от провайдера личности ──────────────────────────────────────────
-app.use('/idp', identity.routes(completeAuthorization));
+// Провайдер один и тот же для двух сценариев: подключение коннектора (OAuth)
+// и вход в веб-панель. Разводим по назначению заявки.
+app.use(
+    '/idp',
+    identity.routes(async (pendingId, verified, res) => {
+        if (purposeOfPending(pendingId) === 'panel') {
+            await completePanelLogin(pendingId, verified, res);
+            return;
+        }
+        await completeAuthorization(pendingId, verified, res);
+    })
+);
+
+// ─── Веб-панель ──────────────────────────────────────────────────────────────
+app.use('/panel', panelRouter());
 
 // ─── MCP ─────────────────────────────────────────────────────────────────────
 const requireAuth = requireBearerAuth({
@@ -98,6 +116,7 @@ app.get('/', (_req, res) => {
 <p>Это remote MCP-сервер для работы с отзывами, вопросами и чатами покупателей.</p>
 <p>Адрес для подключения в Claude: <code>${config.resourceUrl.href}</code></p>
 <p>Доступ выдаёт администратор организации. Вход — через ${config.identityProvider}.</p>
+<p><a href="/panel">Панель состояния</a></p>
 </body></html>`);
 });
 

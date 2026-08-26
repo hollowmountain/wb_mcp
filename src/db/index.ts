@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
 -- Заявка на авторизацию, живёт от /authorize до возврата из IdP.
 CREATE TABLE IF NOT EXISTS pending_auth (
   id             TEXT PRIMARY KEY,
+  purpose        TEXT NOT NULL DEFAULT 'oauth',
   client_id      TEXT NOT NULL,
   redirect_uri   TEXT NOT NULL,
   client_state   TEXT,
@@ -115,6 +116,7 @@ function addColumnIfMissing(table: string, column: string, definition: string): 
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
+addColumnIfMissing('pending_auth', 'purpose', "TEXT NOT NULL DEFAULT 'oauth'");
 addColumnIfMissing('drafts', 'cabinet', "TEXT NOT NULL DEFAULT 'main'");
 addColumnIfMissing('audit', 'cabinet', 'TEXT');
 

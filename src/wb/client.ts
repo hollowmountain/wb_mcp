@@ -8,7 +8,7 @@ import { sleep } from './ratelimit.js';
  * Лимиты ниже — для персонального токена, см. раздел «Общение с покупателями»:
  * https://dev.wildberries.ru/openapi/user-communication
  */
-export type WbCategory = 'feedbacks' | 'chat' | 'returns';
+export type WbCategory = 'feedbacks' | 'chat' | 'returns' | 'common';
 
 const HOSTS: Record<WbCategory, { prod: string; sandbox: string | null }> = {
     // Вопросы, отзывы, закреплённые отзывы
@@ -19,7 +19,9 @@ const HOSTS: Record<WbCategory, { prod: string; sandbox: string | null }> = {
     // Чат с покупателями. Отдельного sandbox-хоста у WB нет — проверено по DNS.
     chat: { prod: 'https://buyer-chat-api.wildberries.ru', sandbox: null },
     // Заявки покупателей на возврат
-    returns: { prod: 'https://returns-api.wildberries.ru', sandbox: null }
+    returns: { prod: 'https://returns-api.wildberries.ru', sandbox: null },
+    // Общие методы: информация о продавце, проверка подключения
+    common: { prod: 'https://common-api.wildberries.ru', sandbox: null }
 };
 
 // Вёдра лимитов живут в самом кабинете: лимиты WB считаются на аккаунт
@@ -215,6 +217,11 @@ export async function wbChat<T>(cabinet: Cabinet, opts: Omit<RequestOptions, 'ca
         throw new WbApiError(res.errors.join('; '), 400, 'chat', opts.path, res.errors);
     }
     return res.result;
+}
+
+/** Общие методы отдают тело без конверта. */
+export async function wbCommon<T>(cabinet: Cabinet, path: string): Promise<T> {
+    return request<T>({ cabinet, category: 'common', path });
 }
 
 export async function wbChatFile(cabinet: Cabinet, path: string): Promise<ArrayBuffer> {

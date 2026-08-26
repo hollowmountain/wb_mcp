@@ -19,6 +19,7 @@ export interface Cabinet {
         feedbacks: TokenBucket;
         chat: TokenBucket;
         returns: TokenBucket;
+        common: TokenBucket;
     };
 }
 
@@ -29,7 +30,8 @@ function makeBuckets(): Cabinet['buckets'] {
     return {
         feedbacks: new TokenBucket(6, 3),
         chat: new TokenBucket(10, 1),
-        returns: new TokenBucket(10, 20 / 60)
+        returns: new TokenBucket(10, 20 / 60),
+        common: new TokenBucket(10, 1)
     };
 }
 
