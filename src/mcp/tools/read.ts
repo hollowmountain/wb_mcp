@@ -1,6 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
+import { allowedCabinets, resolveCabinets } from '../../access.js';
+import type { Actor } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { kvGet, kvSet } from '../../db/index.js';
 import type { Cabinet } from '../../wb/cabinets.js';
@@ -20,7 +22,7 @@ import {
     listQuestions
 } from '../../wb/api.js';
 import { formatChat, formatChatEvent, formatFeedback, formatQuestion, joinBlocks } from '../format.js';
-import { guarded, text, toUnixSeconds, type ToolResult } from './common.js';
+import { actorOf, guarded, text, toUnixSeconds, type ToolResult } from './common.js';
 import { locateFeedback, locateQuestion } from './resolve.js';
 
 const chatCursorKey = (slug: string): string => `chat.events.cursor.${slug}`;
@@ -42,25 +44,26 @@ const cabinetRequiredArg = z
         'Идентификатор кабинета Wildberries. Если не указан, кабинет определяется по идентификатору обращения.'
     );
 
-/** Заголовок блока кабинета. При единственном кабинете не засоряем вывод. */
-function heading(cabinet: Cabinet): string {
-    return config.cabinets.size === 1 ? '' : `━━ Кабинет ${cabinet.slug} (${cabinet.label}) ━━\n`;
+/** Заголовок блока кабинета. При единственном доступном кабинете не засоряем вывод. */
+function heading(cabinet: Cabinet, total: number): string {
+    return total === 1 ? '' : `━━ Кабинет ${cabinet.slug} (${cabinet.label}) ━━\n`;
 }
 
-/** Прогон операции по нескольким кабинетам с аккуратной обработкой отказов. */
+/** Прогон операции по доступным кабинетам с аккуратной обработкой отказов. */
 async function overCabinets(
+    actor: Actor,
     slug: string | undefined,
     run: (cabinet: Cabinet) => Promise<string>
 ): Promise<ToolResult> {
-    const cabinets = config.cabinets.resolveMany(slug);
+    const cabinets = resolveCabinets(actor, slug);
     const blocks = await Promise.all(
         cabinets.map(async cabinet => {
             try {
-                return heading(cabinet) + (await run(cabinet));
+                return heading(cabinet, cabinets.length) + (await run(cabinet));
             } catch (e) {
                 // Падение одного кабинета не должно скрывать данные остальных.
                 const message = e instanceof Error ? e.message : String(e);
-                return `${heading(cabinet)}Ошибка: ${message}`;
+                return `${heading(cabinet, cabinets.length)}Ошибка: ${message}`;
             }
         })
     );
@@ -77,8 +80,8 @@ export function registerReadTools(server: McpServer): void {
             inputSchema: {},
             annotations: { readOnlyHint: true }
         },
-        guarded('wb_cabinets', async () => {
-            const blocks = config.cabinets.all().map(c => {
+        guarded('wb_cabinets', async (_args, extra) => {
+            const blocks = allowedCabinets(actorOf(extra)).map(c => {
                 const days = daysLeft(c.info);
                 const cats = [...c.info.categories].map(k => CATEGORY_NAMES[k]).join(', ');
                 const lines = [
@@ -103,8 +106,8 @@ export function registerReadTools(server: McpServer): void {
             inputSchema: { cabinet: cabinetArg },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_overview', async args =>
-            overCabinets(args.cabinet, async cabinet => {
+        guarded('wb_overview', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const [feedbacks, questions, fresh] = await Promise.all([
                     countUnansweredFeedbacks(cabinet),
                     countUnansweredQuestions(cabinet),
@@ -148,8 +151,8 @@ export function registerReadTools(server: McpServer): void {
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_feedbacks_list', async args =>
-            overCabinets(args.cabinet, async cabinet => {
+        guarded('wb_feedbacks_list', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const res = await listFeedbacks(cabinet, {
                     isAnswered: args.isAnswered,
                     take: args.take,
@@ -174,9 +177,9 @@ export function registerReadTools(server: McpServer): void {
             inputSchema: { cabinet: cabinetRequiredArg, id: z.string().min(1).describe('ID отзыва') },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_feedback_get', async args => {
-            const { cabinet, item } = await locateFeedback(args.cabinet, args.id);
-            return text(heading(cabinet) + formatFeedback(item));
+        guarded('wb_feedback_get', async (args, extra) => {
+            const { cabinet, item } = await locateFeedback(actorOf(extra), args.cabinet, args.id);
+            return text(heading(cabinet, config.cabinets.size) + formatFeedback(item));
         })
     );
 
@@ -195,8 +198,8 @@ export function registerReadTools(server: McpServer): void {
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_feedbacks_archive', async args =>
-            overCabinets(args.cabinet, async cabinet => {
+        guarded('wb_feedbacks_archive', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const res = await listArchivedFeedbacks(cabinet, {
                     take: args.take,
                     skip: args.skip,
@@ -217,8 +220,8 @@ export function registerReadTools(server: McpServer): void {
             inputSchema: { cabinet: cabinetArg, isAnswered: z.boolean(), dateFrom: dateArg, dateTo: dateArg },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_feedbacks_count', async args =>
-            overCabinets(args.cabinet, async cabinet => {
+        guarded('wb_feedbacks_count', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const count = await countFeedbacks(cabinet, {
                     isAnswered: args.isAnswered,
                     dateFrom: toUnixSeconds(args.dateFrom),
@@ -248,8 +251,8 @@ export function registerReadTools(server: McpServer): void {
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_questions_list', async args =>
-            overCabinets(args.cabinet, async cabinet => {
+        guarded('wb_questions_list', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const res = await listQuestions(cabinet, {
                     isAnswered: args.isAnswered,
                     take: args.take,
@@ -274,9 +277,9 @@ export function registerReadTools(server: McpServer): void {
             inputSchema: { cabinet: cabinetRequiredArg, id: z.string().min(1).describe('ID вопроса') },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_question_get', async args => {
-            const { cabinet, item } = await locateQuestion(args.cabinet, args.id);
-            return text(heading(cabinet) + formatQuestion(item));
+        guarded('wb_question_get', async (args, extra) => {
+            const { cabinet, item } = await locateQuestion(actorOf(extra), args.cabinet, args.id);
+            return text(heading(cabinet, config.cabinets.size) + formatQuestion(item));
         })
     );
 
@@ -288,8 +291,8 @@ export function registerReadTools(server: McpServer): void {
             inputSchema: { cabinet: cabinetArg, isAnswered: z.boolean(), dateFrom: dateArg, dateTo: dateArg },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_questions_count', async args =>
-            overCabinets(args.cabinet, async cabinet => {
+        guarded('wb_questions_count', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const count = await countQuestions(cabinet, {
                     isAnswered: args.isAnswered,
                     dateFrom: toUnixSeconds(args.dateFrom),
@@ -311,8 +314,8 @@ export function registerReadTools(server: McpServer): void {
             inputSchema: { cabinet: cabinetArg },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_chats_list', async args =>
-            overCabinets(args.cabinet, async cabinet => {
+        guarded('wb_chats_list', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const chats = await listChats(cabinet);
                 return joinBlocks(
                     chats.map((c, i) => formatChat(c, i + 1)),
@@ -340,8 +343,8 @@ export function registerReadTools(server: McpServer): void {
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('wb_chat_events', async args =>
-            overCabinets(args.cabinet, async cabinet => {
+        guarded('wb_chat_events', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const key = chatCursorKey(cabinet.slug);
                 const stored = kvGet(key);
                 const since =

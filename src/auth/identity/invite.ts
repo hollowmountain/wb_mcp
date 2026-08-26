@@ -6,6 +6,7 @@ import type { IdentityProvider } from './types.js';
 interface InviteRow {
     code: string;
     email: string;
+    cabinets: string | null;
     used_at: number | null;
 }
 
@@ -37,7 +38,7 @@ export const inviteIdentity: IdentityProvider = {
                 return;
             }
 
-            const row = db.prepare('SELECT code, email, used_at FROM invites WHERE code = ?').get(code) as
+            const row = db.prepare('SELECT code, email, cabinets, used_at FROM invites WHERE code = ?').get(code) as
                 | InviteRow
                 | undefined;
 
@@ -51,7 +52,12 @@ export const inviteIdentity: IdentityProvider = {
             }
 
             db.prepare('UPDATE invites SET used_at = ? WHERE code = ?').run(now(), code);
-            await complete(pendingId, { email: row.email }, res);
+
+            const scope = (row.cabinets ?? '')
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean);
+            await complete(pendingId, { email: row.email, ...(scope.length > 0 ? { cabinets: scope } : {}) }, res);
         });
 
         return router;

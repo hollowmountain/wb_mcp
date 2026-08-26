@@ -2,7 +2,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import { audit } from '../../audit.js';
-import { canSend, config } from '../../config.js';
+import { canUseCabinet, allowedCabinets, resolveCabinet } from '../../access.js';
+import { canSend } from '../../config.js';
 import {
     assertCanSend,
     createDraft,
@@ -49,7 +50,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_draft_feedback_reply', async (args, extra) => {
             const actor = actorOf(extra);
-            const { cabinet, item: feedback } = await locateFeedback(args.cabinet, args.feedbackId);
+            const { cabinet, item: feedback } = await locateFeedback(actor, args.cabinet, args.feedbackId);
 
             if (feedback.answer?.text) {
                 return fail(
@@ -88,7 +89,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_draft_feedback_answer_edit', async (args, extra) => {
             const actor = actorOf(extra);
-            const { cabinet, item: feedback } = await locateFeedback(args.cabinet, args.feedbackId);
+            const { cabinet, item: feedback } = await locateFeedback(actor, args.cabinet, args.feedbackId);
 
             if (!feedback.answer?.text) {
                 return fail(`У отзыва ${args.feedbackId} ещё нет ответа — используйте wb_draft_feedback_reply.`);
@@ -129,7 +130,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_draft_question_answer', async (args, extra) => {
             const actor = actorOf(extra);
-            const { cabinet, item: question } = await locateQuestion(args.cabinet, args.questionId);
+            const { cabinet, item: question } = await locateQuestion(actor, args.cabinet, args.questionId);
 
             const draft = createDraft({
                 cabinet,
@@ -164,7 +165,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_draft_chat_message', async (args, extra) => {
             const actor = actorOf(extra);
-            const { cabinet, item: chat } = await locateChat(args.cabinet, args.chatId);
+            const { cabinet, item: chat } = await locateChat(actor, args.cabinet, args.chatId);
 
             const draft = createDraft({
                 cabinet,
@@ -195,9 +196,12 @@ export function registerWriteTools(server: McpServer): void {
             },
             annotations: { readOnlyHint: true }
         },
-        guarded('wb_drafts_list', async args => {
-            const slug = args.cabinet ? config.cabinets.resolve(args.cabinet).slug : undefined;
-            const drafts = listDrafts(args.status as DraftStatus | undefined, slug, args.limit);
+        guarded('wb_drafts_list', async (args, extra) => {
+            const actor = actorOf(extra);
+            const slug = args.cabinet ? resolveCabinet(actor, args.cabinet).slug : undefined;
+            const drafts = listDrafts(args.status as DraftStatus | undefined, slug, args.limit).filter(d =>
+                canUseCabinet(actor, d.cabinet)
+            );
             if (drafts.length === 0) return text('Черновиков нет.');
             return text(drafts.map(describeDraft).join('\n\n'));
         })
@@ -263,8 +267,9 @@ export function registerWriteTools(server: McpServer): void {
             if (args.confirm !== CONFIRM_PHRASE) {
                 return fail(`Отклонение не выполнено: confirm должен быть ровно "${CONFIRM_PHRASE}".`);
             }
-            const { cabinet } = await locateQuestion(args.cabinet, args.questionId);
-            await sendQuestionRejection(cabinet, args.questionId, args.reason, actorOf(extra));
+            const actor = actorOf(extra);
+            const { cabinet } = await locateQuestion(actor, args.cabinet, args.questionId);
+            await sendQuestionRejection(cabinet, args.questionId, args.reason, actor);
             return text(`Вопрос ${args.questionId} отклонён в кабинете «${cabinet.label}».`);
         })
     );
@@ -279,7 +284,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_question_mark_viewed', async (args, extra) => {
             const actor = actorOf(extra);
-            const { cabinet } = await locateQuestion(args.cabinet, args.questionId);
+            const { cabinet } = await locateQuestion(actor, args.cabinet, args.questionId);
             assertCanSend(cabinet, actor, 'question.viewed', args.questionId);
             await markQuestionViewed(cabinet, args.questionId);
             audit({
@@ -304,8 +309,7 @@ export function registerWriteTools(server: McpServer): void {
         },
         guarded('wb_whoami', async (_args, extra) => {
             const actor = actorOf(extra);
-            const cabinets = config.cabinets
-                .all()
+            const cabinets = allowedCabinets(actor)
                 .map(c => `  ${c.slug} — ${c.label}${c.info.readOnly ? ' (токен только на чтение)' : ''}`)
                 .join('\n');
             return text(

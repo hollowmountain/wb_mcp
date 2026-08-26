@@ -1,6 +1,7 @@
 import { audit } from './audit.js';
 import { db, newId, now } from './db/index.js';
 import type { Actor } from './auth/provider.js';
+import { canUseCabinet } from './access.js';
 import { canSend, config } from './config.js';
 import type { Cabinet } from './wb/cabinets.js';
 import {
@@ -118,6 +119,9 @@ export function listDrafts(status?: DraftStatus, cabinetSlug?: string, limit = 5
 export function discardDraft(id: string, actor: Actor): Draft {
     const draft = getDraft(id);
     if (!draft) throw new DraftError(`Черновик ${id} не найден.`);
+    if (!canUseCabinet(actor, draft.cabinet)) {
+        throw new DraftError(`Черновик ${id} относится к кабинету, который вам не доступен.`);
+    }
     if (draft.status !== 'pending') throw new DraftError(`Черновик ${id} уже в статусе «${draft.status}».`);
 
     db.prepare('UPDATE drafts SET status = ? WHERE id = ?').run('discarded', id);
@@ -134,6 +138,11 @@ export async function sendDraft(id: string, actor: Actor): Promise<Draft> {
     if (!draft) throw new DraftError(`Черновик ${id} не найден.`);
     if (draft.status !== 'pending') {
         throw new DraftError(`Черновик ${id} уже в статусе «${draft.status}», повторная отправка невозможна.`);
+    }
+
+    if (!canUseCabinet(actor, draft.cabinet)) {
+        audit({ actor: actor.email, cabinet: draft.cabinet, action: `draft.send.${draft.kind}`, target: id, outcome: 'denied' });
+        throw new DraftError(`Черновик ${id} относится к кабинету, который вам не доступен.`);
     }
 
     const cabinet = config.cabinets.resolve(draft.cabinet);

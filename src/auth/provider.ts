@@ -338,11 +338,15 @@ export async function completeAuthorization(
     }
 
     const timestamp = now();
+    // Область видимости приходит из способа входа (например, из одноразового кода)
+    // и перезаписывает прежнюю: выдали новый код на один кабинет — доступ сузился.
+    const scope = verified.cabinets && verified.cabinets.length > 0 ? verified.cabinets.join(',') : null;
     db.prepare(
-        `INSERT INTO users (email, name, first_seen, last_seen) VALUES (?, ?, ?, ?)
+        `INSERT INTO users (email, name, cabinets, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(email) DO UPDATE SET last_seen = excluded.last_seen,
-                                          name = COALESCE(excluded.name, users.name)`
-    ).run(email, verified.name ?? null, timestamp, timestamp);
+                                          name = COALESCE(excluded.name, users.name),
+                                          cabinets = excluded.cabinets`
+    ).run(email, verified.name ?? null, scope, timestamp, timestamp);
 
     const code = newId(32);
     db.prepare(
@@ -379,10 +383,26 @@ export interface Actor {
     email: string;
     role: Role;
     scopes: string[];
+    /** Кабинеты, доступные этому человеку. null — все. */
+    cabinets: string[] | null;
+}
+
+/** Читаем область видимости из базы на каждом запросе: сужение действует сразу. */
+export function cabinetScopeOf(email: string): string[] | null {
+    const row = db.prepare('SELECT cabinets FROM users WHERE email = ?').get(email) as
+        | { cabinets: string | null }
+        | undefined;
+    const raw = row?.cabinets ?? null;
+    if (!raw) return null;
+    const list = raw
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+    return list.length > 0 ? list : null;
 }
 
 export function actorFromAuthInfo(auth: AuthInfo | undefined): Actor {
     const email = typeof auth?.extra?.email === 'string' ? auth.extra.email : undefined;
     if (!email) throw new InvalidTokenError('В токене нет личности пользователя');
-    return { email, role: roleForEmail(email), scopes: auth?.scopes ?? [] };
+    return { email, role: roleForEmail(email), scopes: auth?.scopes ?? [], cabinets: cabinetScopeOf(email) };
 }

@@ -90,11 +90,21 @@ export function panelRouter(): Router {
         }
 
         try {
-            const cabinets = await Promise.all(config.cabinets.all().map(statusOf));
+            const visible = config.cabinets
+                .all()
+                .filter(c => session.cabinets === null || session.cabinets.includes(c.slug));
+            const cabinets = await Promise.all(visible.map(statusOf));
 
             const users = db
                 .prepare('SELECT email, name, last_seen FROM users ORDER BY last_seen DESC LIMIT 50')
                 .all() as Array<{ email: string; name: string | null; last_seen: number }>;
+
+            const scopeOf = (email: string): string => {
+                const row = db.prepare('SELECT cabinets FROM users WHERE email = ?').get(email) as
+                    | { cabinets: string | null }
+                    | undefined;
+                return row?.cabinets ? row.cabinets : 'все';
+            };
 
             const audit = db
                 .prepare(
@@ -111,7 +121,7 @@ export function panelRouter(): Router {
                 renderPanel({
                     session,
                     cabinets,
-                    users: users.map(u => ({ ...u, role: roleLabel(u.email) })),
+                    users: users.map(u => ({ ...u, role: roleLabel(u.email), scope: scopeOf(u.email) })),
                     audit,
                     drafts: { pending: byStatus('pending'), sent: byStatus('sent'), failed: byStatus('failed') },
                     generatedAt: Math.floor(Date.now() / 1000)

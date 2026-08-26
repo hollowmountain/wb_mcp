@@ -1,4 +1,5 @@
-import { config } from '../../config.js';
+import { allowedCabinets, resolveCabinet } from '../../access.js';
+import type { Actor } from '../../auth/provider.js';
 import { CabinetError, type Cabinet } from '../../wb/cabinets.js';
 import { getFeedback, getQuestion, listChats, type Chat, type Feedback, type Question } from '../../wb/api.js';
 
@@ -13,23 +14,26 @@ import { getFeedback, getQuestion, listChats, type Chat, type Feedback, type Que
  * если ID нашёлся в нескольких кабинетах, честно требуем уточнить.
  */
 async function locate<T>(
+    actor: Actor,
     slug: string | undefined,
     id: string,
     what: string,
     fetch: (cabinet: Cabinet) => Promise<T>
 ): Promise<{ cabinet: Cabinet; item: T }> {
     if (slug !== undefined && slug !== '') {
-        const cabinet = config.cabinets.resolve(slug);
+        const cabinet = resolveCabinet(actor, slug);
         return { cabinet, item: await fetch(cabinet) };
     }
-    if (config.cabinets.size === 1) {
-        const cabinet = config.cabinets.resolve();
+
+    const candidates = allowedCabinets(actor);
+    if (candidates.length === 1) {
+        const cabinet = candidates[0]!;
         return { cabinet, item: await fetch(cabinet) };
     }
 
     type Hit = { cabinet: Cabinet; item: T };
     const probes = await Promise.all(
-        config.cabinets.all().map(async (cabinet): Promise<Hit | null> => {
+        candidates.map(async (cabinet): Promise<Hit | null> => {
             try {
                 const item = await fetch(cabinet);
                 return item === undefined || item === null ? null : { cabinet, item };
@@ -48,7 +52,7 @@ async function locate<T>(
     if (found.length === 1) return found[0]!;
     if (found.length === 0) {
         throw new CabinetError(
-            `${what} ${id} не найден ни в одном из кабинетов: ${config.cabinets.describeChoices()}. Проверьте идентификатор.`
+            `${what} ${id} не найден ни в одном из доступных вам кабинетов. Проверьте идентификатор.`
         );
     }
     throw new CabinetError(
@@ -56,14 +60,24 @@ async function locate<T>(
     );
 }
 
-export const locateFeedback = (slug: string | undefined, id: string): Promise<{ cabinet: Cabinet; item: Feedback }> =>
-    locate(slug, id, 'Отзыв', cabinet => getFeedback(cabinet, id));
+export const locateFeedback = (
+    actor: Actor,
+    slug: string | undefined,
+    id: string
+): Promise<{ cabinet: Cabinet; item: Feedback }> => locate(actor, slug, id, 'Отзыв', cabinet => getFeedback(cabinet, id));
 
-export const locateQuestion = (slug: string | undefined, id: string): Promise<{ cabinet: Cabinet; item: Question }> =>
-    locate(slug, id, 'Вопрос', cabinet => getQuestion(cabinet, id));
+export const locateQuestion = (
+    actor: Actor,
+    slug: string | undefined,
+    id: string
+): Promise<{ cabinet: Cabinet; item: Question }> => locate(actor, slug, id, 'Вопрос', cabinet => getQuestion(cabinet, id));
 
-export const locateChat = (slug: string | undefined, id: string): Promise<{ cabinet: Cabinet; item: Chat }> =>
-    locate(slug, id, 'Чат', async cabinet => {
+export const locateChat = (
+    actor: Actor,
+    slug: string | undefined,
+    id: string
+): Promise<{ cabinet: Cabinet; item: Chat }> =>
+    locate(actor, slug, id, 'Чат', async cabinet => {
         const chat = (await listChats(cabinet)).find(c => c.chatID === id);
         if (!chat) throw new Error('нет такого чата');
         return chat;

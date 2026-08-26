@@ -4,6 +4,7 @@ import type { Request, Response } from 'express';
 import { audit } from '../audit.js';
 import { config, isAllowedEmail, roleForEmail, type Role } from '../config.js';
 import { db, newId, now } from '../db/index.js';
+import { cabinetScopeOf } from '../auth/provider.js';
 import { identity } from '../auth/identity/index.js';
 import type { VerifiedIdentity } from '../auth/identity/types.js';
 import { deniedPage, errorPage } from '../auth/pages.js';
@@ -14,6 +15,8 @@ const SESSION_TTL_SECONDS = 12 * 60 * 60;
 export interface PanelSession {
     email: string;
     role: Role;
+    /** Кабинеты, открытые этому человеку. null — все. */
+    cabinets: string[] | null;
 }
 
 function sign(payload: string): string {
@@ -56,7 +59,7 @@ export function readSession(req: Request): PanelSession | null {
     // Право доступа проверяем на каждом запросе: увольнение действует сразу.
     if (!isAllowedEmail(email)) return null;
 
-    return { email, role: roleForEmail(email) };
+    return { email, role: roleForEmail(email), cabinets: cabinetScopeOf(email) };
 }
 
 export function clearSession(res: Response): void {
@@ -120,11 +123,13 @@ export async function completePanelLogin(
     }
 
     const timestamp = now();
+    const scope = verified.cabinets && verified.cabinets.length > 0 ? verified.cabinets.join(',') : null;
     db.prepare(
-        `INSERT INTO users (email, name, first_seen, last_seen) VALUES (?, ?, ?, ?)
+        `INSERT INTO users (email, name, cabinets, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(email) DO UPDATE SET last_seen = excluded.last_seen,
-                                          name = COALESCE(excluded.name, users.name)`
-    ).run(email, verified.name ?? null, timestamp, timestamp);
+                                          name = COALESCE(excluded.name, users.name),
+                                          cabinets = excluded.cabinets`
+    ).run(email, verified.name ?? null, scope, timestamp, timestamp);
 
     audit({ actor: email, action: 'panel.login', outcome: 'ok' });
     issueCookie(res, email);

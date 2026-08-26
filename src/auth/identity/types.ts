@@ -3,6 +3,12 @@ import type { Response, Router } from 'express';
 export interface VerifiedIdentity {
     email: string;
     name?: string;
+    /**
+     * Кабинеты, которые открывает этот вход. undefined — все доступные.
+     * Заполняет провайдер, который знает область видимости: например,
+     * одноразовый код может быть выдан на один конкретный кабинет.
+     */
+    cabinets?: string[];
 }
 
 /**

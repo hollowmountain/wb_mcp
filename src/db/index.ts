@@ -60,6 +60,8 @@ CREATE INDEX IF NOT EXISTS tokens_user ON tokens (user_email, kind);
 CREATE TABLE IF NOT EXISTS users (
   email      TEXT PRIMARY KEY,
   name       TEXT,
+  -- Список кабинетов через запятую. NULL или пусто — доступ ко всем.
+  cabinets   TEXT,
   first_seen INTEGER NOT NULL,
   last_seen  INTEGER NOT NULL
 );
@@ -96,6 +98,8 @@ CREATE INDEX IF NOT EXISTS audit_ts ON audit (ts DESC);
 CREATE TABLE IF NOT EXISTS invites (
   code       TEXT PRIMARY KEY,
   email      TEXT NOT NULL,
+  -- Какие кабинеты откроет этот код. Пусто — все.
+  cabinets   TEXT,
   created_at INTEGER NOT NULL,
   used_at    INTEGER
 );
@@ -117,6 +121,8 @@ function addColumnIfMissing(table: string, column: string, definition: string): 
 }
 
 addColumnIfMissing('pending_auth', 'purpose', "TEXT NOT NULL DEFAULT 'oauth'");
+addColumnIfMissing('users', 'cabinets', 'TEXT');
+addColumnIfMissing('invites', 'cabinets', 'TEXT');
 addColumnIfMissing('drafts', 'cabinet', "TEXT NOT NULL DEFAULT 'main'");
 addColumnIfMissing('audit', 'cabinet', 'TEXT');
 

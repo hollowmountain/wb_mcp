@@ -21,7 +21,7 @@ export interface CabinetStatus {
 export interface PanelData {
     session: PanelSession;
     cabinets: CabinetStatus[];
-    users: Array<{ email: string; name: string | null; last_seen: number; role: string }>;
+    users: Array<{ email: string; name: string | null; last_seen: number; role: string; scope: string }>;
     audit: Array<{ ts: number; cabinet: string | null; actor: string; action: string; target: string | null; outcome: string }>;
     drafts: { pending: number; sent: number; failed: number };
     generatedAt: number;
@@ -123,6 +123,7 @@ export function renderPanel(data: PanelData): string {
     const userRows = data.users
         .map(
             u => `<tr><td>${escapeHtml(u.email)}</td><td>${escapeHtml(u.role)}</td>
+                  <td>${escapeHtml(u.scope)}</td>
                   <td class="muted">${ts(u.last_seen)}</td></tr>`
         )
         .join('');
@@ -217,8 +218,8 @@ export function renderPanel(data: PanelData): string {
 
 <h2>Кто имеет доступ</h2>
 <div class="scroll"><table>
-  <tr><th>Почта</th><th>Роль</th><th>Последний вход</th></tr>
-  ${userRows || '<tr><td colspan="3" class="muted">Пока никто не подключался</td></tr>'}
+  <tr><th>Почта</th><th>Роль</th><th>Кабинеты</th><th>Последний вход</th></tr>
+  ${userRows || '<tr><td colspan="4" class="muted">Пока никто не подключался</td></tr>'}
 </table></div>
 <p class="muted">Роль <code>reader</code> может только читать: токен без права <code>wb:write</code>, отправка недоступна.</p>
 
