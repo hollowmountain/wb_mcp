@@ -95,9 +95,14 @@ export function panelRouter(): Router {
                 .filter(c => session.cabinets === null || session.cabinets.includes(c.slug));
             const cabinets = await Promise.all(visible.map(statusOf));
 
-            const users = db
-                .prepare('SELECT email, name, last_seen FROM users ORDER BY last_seen DESC LIMIT 50')
-                .all() as Array<{ email: string; name: string | null; last_seen: number }>;
+            // Список сотрудников — сведения о всей организации. Их видит только
+            // администратор; ограниченный сотрудник видит одну свою строку.
+            const isAdmin = session.role === 'admin';
+            const users = (
+                isAdmin
+                    ? db.prepare('SELECT email, name, last_seen FROM users ORDER BY last_seen DESC LIMIT 50').all()
+                    : db.prepare('SELECT email, name, last_seen FROM users WHERE email = ?').all(session.email)
+            ) as Array<{ email: string; name: string | null; last_seen: number }>;
 
             const scopeOf = (email: string): string => {
                 const row = db.prepare('SELECT cabinets FROM users WHERE email = ?').get(email) as
@@ -106,15 +111,34 @@ export function panelRouter(): Router {
                 return row?.cabinets ? row.cabinets : 'все';
             };
 
-            const audit = db
-                .prepare(
-                    'SELECT ts, cabinet, actor, action, target, outcome FROM audit ORDER BY ts DESC LIMIT 40'
-                )
-                .all() as PanelData['audit'];
+            // Журнал: администратору целиком, остальным — только свои действия
+            // и события своих кабинетов. Чужая активность не показывается.
+            const allowed = session.cabinets;
+            const audit = (
+                isAdmin || allowed === null
+                    ? db
+                          .prepare('SELECT ts, cabinet, actor, action, target, outcome FROM audit ORDER BY ts DESC LIMIT 40')
+                          .all()
+                    : db
+                          .prepare(
+                              `SELECT ts, cabinet, actor, action, target, outcome FROM audit
+                               WHERE actor = ? OR cabinet IN (${allowed.map(() => '?').join(',')})
+                               ORDER BY ts DESC LIMIT 40`
+                          )
+                          .all(session.email, ...allowed)
+            ) as PanelData['audit'];
 
-            const counts = db
-                .prepare('SELECT status, COUNT(*) AS n FROM drafts GROUP BY status')
-                .all() as Array<{ status: string; n: number }>;
+            // Счётчики черновиков — тоже в пределах доступных кабинетов.
+            const counts = (
+                allowed === null
+                    ? db.prepare('SELECT status, COUNT(*) AS n FROM drafts GROUP BY status').all()
+                    : db
+                          .prepare(
+                              `SELECT status, COUNT(*) AS n FROM drafts
+                               WHERE cabinet IN (${allowed.map(() => '?').join(',')}) GROUP BY status`
+                          )
+                          .all(...allowed)
+            ) as Array<{ status: string; n: number }>;
             const byStatus = (s: string): number => counts.find(c => c.status === s)?.n ?? 0;
 
             res.type('html').send(
@@ -122,6 +146,7 @@ export function panelRouter(): Router {
                     session,
                     cabinets,
                     users: users.map(u => ({ ...u, role: roleLabel(u.email), scope: scopeOf(u.email) })),
+                    isAdmin,
                     audit,
                     drafts: { pending: byStatus('pending'), sent: byStatus('sent'), failed: byStatus('failed') },
                     generatedAt: Math.floor(Date.now() / 1000)

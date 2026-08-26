@@ -24,6 +24,8 @@ export interface PanelData {
     users: Array<{ email: string; name: string | null; last_seen: number; role: string; scope: string }>;
     audit: Array<{ ts: number; cabinet: string | null; actor: string; action: string; target: string | null; outcome: string }>;
     drafts: { pending: number; sent: number; failed: number };
+    /** Администратор видит организацию целиком, остальные — только своё. */
+    isAdmin: boolean;
     generatedAt: number;
 }
 
@@ -251,14 +253,14 @@ export function renderPanel(data: PanelData): string {
 </table></div>
 <p class="muted">Лимиты считаются на аккаунт продавца, поэтому у каждого кабинета свои счётчики.</p>
 
-<h2>Кто имеет доступ</h2>
+<h2>${data.isAdmin ? 'Кто имеет доступ' : 'Ваш доступ'}</h2>
 <div class="scroll"><table>
   <tr><th>Почта</th><th>Роль</th><th>Кабинеты</th><th>Последний вход</th></tr>
   ${userRows || '<tr><td colspan="4" class="muted">Пока никто не подключался</td></tr>'}
 </table></div>
-<p class="muted">Роль <code>reader</code> может только читать: токен без права <code>wb:write</code>, отправка недоступна.</p>
+<p class="muted">Роль <code>reader</code> может только читать: токен без права <code>wb:write</code>, отправка недоступна.${data.isAdmin ? '' : ' Показан только ваш доступ.'}</p>
 
-<h2>Последние действия</h2>
+<h2>${data.isAdmin ? 'Последние действия' : 'Ваши последние действия'}</h2>
 <div class="scroll"><table>
   <tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Кабинет</th><th>Итог</th></tr>
   ${auditRows || '<tr><td colspan="5" class="muted">Записей нет</td></tr>'}
