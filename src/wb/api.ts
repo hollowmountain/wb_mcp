@@ -492,3 +492,48 @@ export async function listFbsOrders(
     });
     return { orders: res?.orders ?? [], next: res?.next ?? 0 };
 }
+
+/**
+ * В массиве warehouses WB держит вперемешку реальные склады и строки-агрегаты:
+ * «Всего находится на складах» — это уже сумма складов, а «В пути …» к наличию
+ * вообще не относится. Складывать всё подряд нельзя: получится двойной счёт.
+ * Проверено 02.09.2026 на позиции 749143179: сумма реальных складов 3036 в
+ * точности равна строке «Всего находится на складах».
+ */
+const REMAINS_TOTAL_ROW = 'Всего находится на складах';
+const REMAINS_TRANSIT_ROWS: Record<string, 'toCustomers' | 'returning'> = {
+    'В пути до получателей': 'toCustomers',
+    'В пути возвраты на склад WB': 'returning'
+};
+
+export interface StockBreakdown {
+    /** Сколько лежит на складах и доступно к продаже. */
+    onHand: number;
+    /** Едет покупателям. */
+    toCustomers: number;
+    /** Возвраты, едущие обратно на склад WB. */
+    returning: number;
+    /** Только реальные склады, без агрегатов и без нулей. */
+    warehouses: RemainsWarehouse[];
+}
+
+export function splitRemains(row: RemainsRow): StockBreakdown {
+    const all = row.warehouses ?? [];
+    let toCustomers = 0;
+    let returning = 0;
+    let declaredTotal: number | undefined;
+    const warehouses: RemainsWarehouse[] = [];
+
+    for (const w of all) {
+        const transit = REMAINS_TRANSIT_ROWS[w.warehouseName];
+        if (transit === 'toCustomers') toCustomers += w.quantity;
+        else if (transit === 'returning') returning += w.quantity;
+        else if (w.warehouseName === REMAINS_TOTAL_ROW) declaredTotal = w.quantity;
+        else if (w.quantity > 0) warehouses.push(w);
+    }
+
+    const summed = warehouses.reduce((sum, w) => sum + w.quantity, 0);
+    // Доверяем строке WB, если она есть: она — источник истины, а сумма нужна
+    // на случай, если строку не прислали.
+    return { onHand: declaredTotal ?? summed, toCustomers, returning, warehouses };
+}

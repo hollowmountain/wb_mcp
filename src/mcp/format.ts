@@ -1,3 +1,4 @@
+import { splitRemains } from '../wb/api.js';
 import type {
     Chat,
     ChatEvent,
@@ -247,14 +248,20 @@ function kopecks(value: number | undefined, currency: string | undefined): strin
 
 export function formatStockRow(r: RemainsRow, index?: number): string {
     const head = index === undefined ? '' : `${index}. `;
-    const warehouses = (r.warehouses ?? []).filter(w => w.quantity > 0);
-    const total = warehouses.reduce((sum, w) => sum + w.quantity, 0);
+    const { onHand, toCustomers, returning, warehouses } = splitRemains(r);
     const size = r.techSize && r.techSize !== '0' ? `, размер ${r.techSize}` : '';
 
-    const lines = [`${head}nmID ${r.nmId}${size} ${dash} всего ${total} шт.`];
+    const lines = [`${head}nmID ${r.nmId}${size} ${dash} на складах ${onHand} шт.`];
     if (r.vendorCode || r.subjectName) {
         lines.push(`   ${[r.subjectName, r.vendorCode].filter(Boolean).join(', ')}`);
     }
+    // Товар в пути не лежит на складе и покупателю недоступен — показываем
+    // отдельной строкой, а не в общем числе.
+    const transit: string[] = [];
+    if (toCustomers > 0) transit.push(`едет покупателям ${toCustomers}`);
+    if (returning > 0) transit.push(`возвраты в пути ${returning}`);
+    if (transit.length > 0) lines.push(`   В пути: ${transit.join(', ')}`);
+
     if (warehouses.length === 0) {
         lines.push('   Нет ни на одном складе');
     } else {

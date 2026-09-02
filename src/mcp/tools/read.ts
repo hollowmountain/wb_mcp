@@ -14,6 +14,7 @@ import {
     getGoodByNmId,
     getWarehouseRemains,
     listFbsOrders,
+    splitRemains,
     listClaims,
     searchCards,
     countQuestions,
@@ -514,14 +515,13 @@ export function registerReadTools(server: McpServer): void {
                     return `Данные ${fresh}\n\n${blocks.join('\n\n')}`;
                 }
 
-                const withStock = rows.filter(r => (r.warehouses ?? []).some(w => w.quantity > 0));
-                const total = withStock.reduce(
-                    (sum, r) => sum + (r.warehouses ?? []).reduce((s, w) => s + w.quantity, 0),
-                    0
-                );
+                // Считаем по splitRemains, а не по сырому массиву: там вперемешку
+                // реальные склады и агрегаты, и простая сумма даёт двойной счёт.
+                const withStock = rows.filter(r => splitRemains(r).onHand > 0);
+                const total = withStock.reduce((sum, r) => sum + splitRemains(r).onHand, 0);
                 const blocks = withStock.slice(0, 40).map((r, i) => formatStockRow(r, i + 1));
                 const tail = withStock.length > 40 ? `\n\n… ещё позиций: ${withStock.length - 40}` : '';
-                return `Позиций с остатком: ${withStock.length}, всего ${total} шт. Данные ${fresh}\n\n${joinBlocks(blocks, 'Остатков нет')}${tail}`;
+                return `Позиций с остатком: ${withStock.length}, на складах ${total} шт. Данные ${fresh}\n\n${joinBlocks(blocks, 'Остатков нет')}${tail}`;
             })
         )
     );
