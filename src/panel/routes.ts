@@ -1,7 +1,7 @@
 import { Router } from 'express';
 
 import { config } from '../config.js';
-import { db } from '../db/index.js';
+import { db, kvGet, kvSet } from '../db/index.js';
 import { logger } from '../logger.js';
 import type { Cabinet } from '../wb/cabinets.js';
 import {
@@ -12,7 +12,8 @@ import {
     type SellerInfo
 } from '../wb/api.js';
 import { WbApiError } from '../wb/client.js';
-import { renderPanel, type CabinetStatus, type PanelData } from './render.js';
+import { getOzonSellerInfo, probeOzonAccess } from '../ozon/client.js';
+import { renderPanel, type CabinetStatus, type OzonStatus, type PanelData } from './render.js';
 import { beginPanelLogin, clearSession, readSession } from './session.js';
 
 /**
@@ -68,6 +69,55 @@ async function statusOf(cabinet: Cabinet): Promise<CabinetStatus> {
             error: e instanceof WbApiError ? e.toUserMessage() : String(e)
         };
     }
+}
+
+/**
+ * Состояние кабинетов Ozon. Каждое обращение — четыре запроса к Ozon, а панель
+ * сама обновляется раз в две минуты, поэтому держим результат полчаса.
+ */
+const OZON_TTL_MS = 30 * 60 * 1000;
+
+async function ozonStatuses(): Promise<OzonStatus[]> {
+    if (config.ozon.length === 0) return [];
+
+    const cached = kvGet('panel.ozon');
+    if (cached) {
+        try {
+            const parsed = JSON.parse(cached) as { at: number; rows: OzonStatus[] };
+            if (Date.now() - parsed.at < OZON_TTL_MS) return parsed.rows;
+        } catch {
+            // Повреждённый кэш не повод падать — соберём заново.
+        }
+    }
+
+    const rows = await Promise.all(
+        config.ozon.map(async (cab): Promise<OzonStatus> => {
+            try {
+                const [info, access] = await Promise.all([getOzonSellerInfo(cab), probeOzonAccess(cab)]);
+                return {
+                    slug: cab.slug,
+                    company: info.company?.name ?? null,
+                    legalName: info.company?.legal_name ?? null,
+                    subscriptionType: info.subscription?.type ?? null,
+                    isPremium: Boolean(info.subscription?.is_premium),
+                    access,
+                    error: null
+                };
+            } catch (e) {
+                return {
+                    slug: cab.slug,
+                    company: null,
+                    legalName: null,
+                    subscriptionType: null,
+                    isPremium: false,
+                    access: null,
+                    error: e instanceof Error ? e.message : String(e)
+                };
+            }
+        })
+    );
+    kvSet('panel.ozon', JSON.stringify({ at: Date.now(), rows }));
+    return rows;
 }
 
 export function panelRouter(): Router {
@@ -141,6 +191,23 @@ export function panelRouter(): Router {
             ) as Array<{ status: string; n: number }>;
             const byStatus = (s: string): number => counts.find(c => c.status === s)?.n ?? 0;
 
+            // Очередь черновиков в разрезе кабинетов: видно, где накопилось.
+            const perCabinet = (
+                allowed === null
+                    ? db
+                          .prepare("SELECT cabinet, COUNT(*) AS n FROM drafts WHERE status = 'pending' GROUP BY cabinet")
+                          .all()
+                    : db
+                          .prepare(
+                              `SELECT cabinet, COUNT(*) AS n FROM drafts WHERE status = 'pending'
+                               AND cabinet IN (${allowed.map(() => '?').join(',')}) GROUP BY cabinet`
+                          )
+                          .all(...allowed)
+            ) as Array<{ cabinet: string; n: number }>;
+
+            // Ozon показываем только администратору: это сведения об организации.
+            const ozon = isAdmin ? await ozonStatuses().catch(() => []) : [];
+
             res.type('html').send(
                 renderPanel({
                     session,
@@ -149,6 +216,10 @@ export function panelRouter(): Router {
                     isAdmin,
                     audit,
                     drafts: { pending: byStatus('pending'), sent: byStatus('sent'), failed: byStatus('failed') },
+                    draftsByCabinet: perCabinet
+                        .map(r => ({ cabinet: r.cabinet, pending: r.n }))
+                        .sort((a, b) => b.pending - a.pending),
+                    ozon,
                     generatedAt: Math.floor(Date.now() / 1000)
                 })
             );

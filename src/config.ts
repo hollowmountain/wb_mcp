@@ -1,5 +1,6 @@
 import { config as loadEnv } from 'dotenv';
 import { z } from 'zod';
+import type { OzonCabinet } from './ozon/client.js';
 import { buildCabinet, CabinetRegistry, type Cabinet } from './wb/cabinets.js';
 
 loadEnv();
@@ -118,6 +119,30 @@ function buildRegistry(): CabinetRegistry {
     return new CabinetRegistry(cabinets);
 }
 
+/**
+ * Кабинеты Ozon задаются так:
+ *   OZON_CABINETS=beauty,harbez
+ *   OZON_CLIENT_ID_BEAUTY=12345
+ *   OZON_API_KEY_BEAUTY=...
+ *
+ * Слаги имеет смысл держать теми же, что у WB: одно юрлицо — один слаг.
+ */
+function buildOzonCabinets(): OzonCabinet[] {
+    const out: OzonCabinet[] = [];
+    for (const slug of csv(process.env.OZON_CABINETS)) {
+        const key = slug.toUpperCase().replaceAll('-', '_');
+        const clientId = process.env[`OZON_CLIENT_ID_${key}`]?.trim();
+        const apiKey = process.env[`OZON_API_KEY_${key}`]?.trim();
+        if (!clientId || !apiKey) {
+            throw new Error(
+                `Кабинет Ozon «${slug}» объявлен в OZON_CABINETS, но OZON_CLIENT_ID_${key} или OZON_API_KEY_${key} пуст`
+            );
+        }
+        out.push({ slug, clientId, apiKey });
+    }
+    return out;
+}
+
 export const config = {
     publicUrl,
     issuerUrl: publicUrl,
@@ -129,6 +154,8 @@ export const config = {
         sandbox: env.WB_SANDBOX
     },
     cabinets: buildRegistry(),
+    /** Кабинеты Ozon. Пусто — Ozon не настроен, панель просто не покажет раздел. */
+    ozon: buildOzonCabinets(),
 
     identityProvider: env.IDENTITY_PROVIDER,
     google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET },
