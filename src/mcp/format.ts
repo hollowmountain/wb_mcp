@@ -121,6 +121,28 @@ function rub(value: number | undefined, currency: string | undefined): string {
     return `${value.toLocaleString('ru-RU')} ${currency ?? ''}`.trim();
 }
 
+/**
+ * В заявках на возврат валюта приходит числовым кодом ISO 4217 («643»),
+ * а в ценах — буквенным («RUB»). Приводим к буквенному, чтобы в выводе
+ * не появлялось «889 643», где 643 — это не разряды, а код валюты.
+ */
+const ISO_4217_NUMERIC: Record<string, string> = {
+    '643': 'RUB',
+    '840': 'USD',
+    '978': 'EUR',
+    '398': 'KZT',
+    '933': 'BYN',
+    '051': 'AMD',
+    '417': 'KGS',
+    '860': 'UZS',
+    '972': 'TJS'
+};
+
+function currencyName(code: string | undefined): string | undefined {
+    if (!code) return undefined;
+    return ISO_4217_NUMERIC[code] ?? code;
+}
+
 function characteristic(c: { name: string; value: unknown }): string {
     const v = Array.isArray(c.value) ? c.value.join(', ') : String(c.value ?? '');
     return `${c.name}: ${v}`;
@@ -183,9 +205,7 @@ export function formatReturnClaim(c: ReturnClaim, index?: number): string {
     const lines: string[] = [
         `${head}Заявка ${c.id} ${dash} ${ts(c.dt)}`,
         `   Товар: ${c.imt_name || dash} (nmID ${c.nm_id})`,
-        // Здесь, в отличие от цен, сумма приходит в копейках: у заявки на крем
-        // было 889643, то есть 8 896,43. Поэтому price(), а не rub().
-        `   Сумма: ${price(c.price, c.currency_code)} ${dash} заказ от ${ts(c.order_dt)}`,
+        `   Сумма: ${rub(c.price, currencyName(c.currency_code))} ${dash} заказ от ${ts(c.order_dt)}`,
         // Числовые коды WB не расшифровывает в открытой документации, поэтому
         // показываем как есть: врать про смысл статуса хуже, чем показать цифру.
         `   Статус: код ${c.status} (расширенный ${c.status_ex}), тип заявки ${c.claim_type}`
