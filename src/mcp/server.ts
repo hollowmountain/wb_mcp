@@ -1,4 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Actor } from '../auth/provider.js';
+import { canUseNepsell } from '../config.js';
+import { registerNepsellTools } from './tools/nepsell.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWriteTools } from './tools/write.js';
 
@@ -34,14 +37,37 @@ const INSTRUCTIONS = `Этот сервер даёт доступ к общен�
 что-либо менять. Изменить карточку, цену или статус возврата через этот сервер нельзя —
 он умеет только отвечать покупателям.`;
 
-export function createMcpServer(): McpServer {
+/**
+ * Про Nepsell рассказываем только тем, кому он открыт: там себестоимость и
+ * экономика. Сервер создаётся на каждый запрос, так что и набор инструментов,
+ * и инструкции могут быть разными у разных людей.
+ */
+const NEPSELL_INSTRUCTIONS = `
+
+Вам доступны данные Nepsell — это отдельный сервис аналитики, не маркетплейс.
+Берите оттуда только то, чего нет у площадок:
+- СЕБЕСТОИМОСТЬ и всё, что из неё следует: прибыль, маржа. Ни Wildberries, ни
+  Ozon её не знают, поэтому считать маржу по их данным нельзя — только nep_economy.
+- Рекламу в связке с продажами: ДРР, заказы по связанным товарам — nep_ads.
+Остатки, заказы, карточки и отзывы берите у самих площадок: там свежее и подробнее.
+
+Никогда не смешивайте цифры Nepsell и цифры площадки в одном показателе и не
+складывайте их: это разные измерения одного и того же. Всегда говорите человеку,
+откуда взята цифра.`;
+
+export function createMcpServer(actor: Actor): McpServer {
+    const nepsell = canUseNepsell(actor.email);
     const server = new McpServer(
         { name: 'mcp-wb', version: '0.1.0' },
-        { capabilities: { tools: {} }, instructions: INSTRUCTIONS }
+        {
+            capabilities: { tools: {} },
+            instructions: INSTRUCTIONS + (nepsell ? NEPSELL_INSTRUCTIONS : '')
+        }
     );
 
     registerReadTools(server);
     registerWriteTools(server);
+    registerNepsellTools(server, actor);
 
     return server;
 }

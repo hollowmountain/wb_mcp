@@ -9,6 +9,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 
 import { completeAuthorization, wbOAuthProvider, SUPPORTED_SCOPES } from './auth/provider.js';
 import { identity } from './auth/identity/index.js';
+import { actorFromAuthInfo } from './auth/provider.js';
 import { config } from './config.js';
 import { cleanupExpired } from './db/index.js';
 import { logger } from './logger.js';
@@ -87,7 +88,7 @@ const requireAuth = requireBearerAuth({
 app.post('/mcp', requireAuth, express.json({ limit: '4mb' }), async (req, res) => {
     // Без сессий: на каждый запрос свой сервер и транспорт. Так данные одного
     // сотрудника не могут утечь в соединение другого.
-    const server = createMcpServer();
+    const server = createMcpServer(actorFromAuthInfo(req.auth));
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 
     res.on('close', () => {

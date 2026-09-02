@@ -38,6 +38,8 @@ const schema = z.object({
     SESSION_SECRET: z.string().min(32, 'SESSION_SECRET: минимум 32 символа, сгенерируйте `openssl rand -hex 32`'),
     ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
     REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(2592000),
+    NEPSELL_TOKEN: z.string().default(''),
+    NEPSELL_EMAILS: z.string().default(''),
     LOG_LEVEL: z.string().default('info')
 });
 
@@ -156,6 +158,8 @@ export const config = {
     cabinets: buildRegistry(),
     /** Кабинеты Ozon. Пусто — Ozon не настроен, панель просто не покажет раздел. */
     ozon: buildOzonCabinets(),
+    /** Пустой токен — Nepsell выключен, инструменты не появляются ни у кого. */
+    nepsell: { token: env.NEPSELL_TOKEN },
 
     identityProvider: env.IDENTITY_PROVIDER,
     google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET },
@@ -165,6 +169,7 @@ export const config = {
         domains: allowedDomains,
         emails: allowedEmails,
         responders: csv(env.RESPONDER_EMAILS),
+        nepsell: csv(env.NEPSELL_EMAILS),
         admins: adminEmails
     },
 
@@ -195,4 +200,15 @@ export function roleForEmail(email: string): Role {
 
 export function canSend(role: Role): boolean {
     return role === 'responder' || role === 'admin';
+}
+
+/**
+ * Кому открыт Nepsell. Отдельный список, а не роль: там себестоимость и
+ * экономика, и видеть их должен не тот, кто отвечает на отзывы, а тот, кому
+ * это по работе. Администраторы видят всегда.
+ */
+export function canUseNepsell(email: string): boolean {
+    if (!config.nepsell.token) return false;
+    const e = email.toLowerCase();
+    return config.access.admins.includes(e) || config.access.nepsell.includes(e);
 }

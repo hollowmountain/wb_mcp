@@ -55,6 +55,8 @@ export interface TokenInfo {
     expiresAt: Date | null;
     /** ID продавца — по нему видно, что кабинеты действительно разные. */
     sellerId: string | null;
+    /** Числовой id кабинета WB. Nepsell называет тот же кабинет как «w» + oid. */
+    orgId: number | null;
     mask: number;
 }
 
@@ -100,6 +102,7 @@ export function parseToken(token: string): TokenInfo {
         categories,
         expiresAt: typeof payload.exp === 'number' ? new Date(payload.exp * 1000) : null,
         sellerId: typeof payload.sid === 'string' ? payload.sid : null,
+        orgId: typeof payload.oid === 'number' ? payload.oid : null,
         mask
     };
 }
