@@ -118,7 +118,10 @@ export function joinBlocks(blocks: string[], emptyMessage: string): string {
  */
 function rub(value: number | undefined, currency: string | undefined): string {
     if (typeof value !== 'number' || !Number.isFinite(value)) return dash;
-    return `${value.toLocaleString('ru-RU')} ${currency ?? ''}`.trim();
+    // Ограничиваем два знака: WB иногда отдаёт цену с тремя после запятой,
+    // и «690,833 RUB» выглядит как ошибка, хотя это просто округление скидки.
+    const shown = value.toLocaleString('ru-RU', { maximumFractionDigits: 2 });
+    return `${shown} ${currency ?? ''}`.trim();
 }
 
 /**
@@ -182,7 +185,8 @@ export function formatProductCard(card: ProductCard, good: Good | null): string 
     }
 
     const d = card.dimensions;
-    if (d) lines.push(`   Габариты: ${d.length}×${d.width}×${d.height} см, вес брутто ${d.weightBrutto} кг`);
+    // Подписываем оси: без подписи «8×17×6» читается как угодно.
+    if (d) lines.push(`   Габариты: длина ${d.length} × ширина ${d.width} × высота ${d.height} см, вес брутто ${d.weightBrutto} кг`);
 
     const chars = card.characteristics ?? [];
     if (chars.length > 0) {
