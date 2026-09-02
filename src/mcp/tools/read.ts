@@ -6,11 +6,14 @@ import type { Actor } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { kvGet, kvSet } from '../../db/index.js';
 import type { Cabinet } from '../../wb/cabinets.js';
+import type { RemainsRow } from '../../wb/api.js';
 import { CATEGORY_NAMES, daysLeft } from '../../wb/token.js';
 import {
     countFeedbacks,
     getCardByNmId,
     getGoodByNmId,
+    getWarehouseRemains,
+    listFbsOrders,
     listClaims,
     searchCards,
     countQuestions,
@@ -29,15 +32,44 @@ import {
     formatChat,
     formatChatEvent,
     formatFeedback,
+    formatFbsOrder,
     formatProductCard,
     formatQuestion,
     formatReturnClaim,
+    formatStockRow,
     joinBlocks
 } from '../format.js';
 import { actorOf, guarded, text, toUnixSeconds, type ToolResult } from './common.js';
 import { locateFeedback, locateQuestion } from './resolve.js';
 
 const chatCursorKey = (slug: string): string => `chat.events.cursor.${slug}`;
+
+const stocksCacheKey = (slug: string): string => `stocks.remains.${slug}`;
+
+/**
+ * Отчёт об остатках у WB асинхронный и занимает секунд десять, поэтому строить
+ * его на каждый вопрос покупателя нельзя. Держим готовый отчёт 15 минут:
+ * остатки за это время меняются мало, а лимиты аналитики жёсткие.
+ */
+const STOCKS_TTL_MS = 15 * 60 * 1000;
+
+async function remainsCached(cabinet: Cabinet): Promise<{ rows: RemainsRow[]; ageMinutes: number }> {
+    const raw = kvGet(stocksCacheKey(cabinet.slug));
+    if (raw) {
+        try {
+            const parsed = JSON.parse(raw) as { at: number; rows: RemainsRow[] };
+            const age = Date.now() - parsed.at;
+            if (age < STOCKS_TTL_MS && Array.isArray(parsed.rows)) {
+                return { rows: parsed.rows, ageMinutes: Math.floor(age / 60000) };
+            }
+        } catch {
+            // Повреждённый кэш не повод падать — просто построим заново.
+        }
+    }
+    const rows = await getWarehouseRemains(cabinet);
+    kvSet(stocksCacheKey(cabinet.slug), JSON.stringify({ at: Date.now(), rows }));
+    return { rows, ageMinutes: 0 };
+}
 
 const dateArg = z
     .union([z.string(), z.number()])
@@ -454,6 +486,70 @@ export function registerReadTools(server: McpServer): void {
                 const blocks = page.claims.map((c, i) => formatReturnClaim(c, i + 1));
                 const head = `Заявок ${args.archive ? 'в архиве' : 'активных'}: ${page.total}`;
                 return `${head}\n\n${joinBlocks(blocks, 'Заявок нет')}`;
+            })
+        )
+    );
+
+    server.registerTool(
+        'wb_stocks',
+        {
+            title: 'Остатки на складах',
+            description:
+                'Сколько товара осталось на складах Wildberries, по размерам и складам. Без nmId — сводка по всем позициям, у которых что-то есть. Отвечает на вопрос покупателя «есть ли в наличии» и «будет ли снова».',
+            inputSchema: {
+                nmId: z.number().int().positive().optional().describe('Номенклатура WB. Не указана — все позиции с остатком.'),
+                cabinet: cabinetRequiredArg
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('wb_stocks', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
+                const { rows, ageMinutes } = await remainsCached(cabinet);
+                const fresh = ageMinutes === 0 ? 'только что' : `${ageMinutes} мин назад`;
+
+                if (args.nmId !== undefined) {
+                    const mine = rows.filter(r => r.nmId === args.nmId);
+                    if (mine.length === 0) return `Товара nmID ${args.nmId} нет в отчёте об остатках (данные ${fresh}).`;
+                    const blocks = mine.map((r, i) => formatStockRow(r, mine.length > 1 ? i + 1 : undefined));
+                    return `Данные ${fresh}\n\n${blocks.join('\n\n')}`;
+                }
+
+                const withStock = rows.filter(r => (r.warehouses ?? []).some(w => w.quantity > 0));
+                const total = withStock.reduce(
+                    (sum, r) => sum + (r.warehouses ?? []).reduce((s, w) => s + w.quantity, 0),
+                    0
+                );
+                const blocks = withStock.slice(0, 40).map((r, i) => formatStockRow(r, i + 1));
+                const tail = withStock.length > 40 ? `\n\n… ещё позиций: ${withStock.length - 40}` : '';
+                return `Позиций с остатком: ${withStock.length}, всего ${total} шт. Данные ${fresh}\n\n${joinBlocks(blocks, 'Остатков нет')}${tail}`;
+            })
+        )
+    );
+
+    server.registerTool(
+        'wb_orders',
+        {
+            title: 'Заказы FBS',
+            description:
+                'Сборочные задания по схеме FBS: что заказали, когда, на какую сумму, какая доставка. Только заказы со склада продавца — заказы со складов WB (FBO) сюда не попадают.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                nmId: z.number().int().positive().optional().describe('Показать только заказы по этой номенклатуре'),
+                limit: z.number().int().min(1).max(200).optional().describe('Сколько заказов просмотреть, по умолчанию 50')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('wb_orders', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
+                const { orders } = await listFbsOrders(cabinet, { limit: args.limit ?? 50 });
+                const picked = args.nmId === undefined ? orders : orders.filter(o => o.nmId === args.nmId);
+                const blocks = picked.slice(0, 30).map((o, i) => formatFbsOrder(o, i + 1));
+                const head =
+                    args.nmId === undefined
+                        ? `Заказов в выборке: ${orders.length}`
+                        : `Заказов по nmID ${args.nmId}: ${picked.length} из ${orders.length} просмотренных`;
+                const tail = picked.length > 30 ? `\n\n… ещё заказов: ${picked.length - 30}` : '';
+                return `${head}\n\n${joinBlocks(blocks, 'Заказов нет')}${tail}`;
             })
         )
     );

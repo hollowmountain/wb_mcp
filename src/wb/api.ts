@@ -1,5 +1,6 @@
 import type { Cabinet } from './cabinets.js';
 import { wbChat, wbChatFile, wbCommon, wbDataJson, wbFeedbacks, wbJson } from './client.js';
+import { sleep } from './ratelimit.js';
 
 // ─── Общие типы ──────────────────────────────────────────────────────────────
 
@@ -391,4 +392,103 @@ export async function listClaims(
         }
     });
     return { claims: res?.claims ?? [], total: res?.total ?? 0 };
+}
+
+// ─── Остатки на складах WB ───────────────────────────────────────────────────
+//
+// Отчёт готовится асинхронно: создаём задачу, ждём готовности, забираем.
+// Проверено 02.09.2026: задача выполняется за 6–12 секунд.
+
+export interface RemainsWarehouse {
+    warehouseName: string;
+    quantity: number;
+}
+
+export interface RemainsRow {
+    nmId: number;
+    techSize: string;
+    volume: number;
+    warehouses: RemainsWarehouse[];
+    vendorCode?: string;
+    brand?: string;
+    subjectName?: string;
+    barcode?: string;
+}
+
+async function createRemainsTask(cabinet: Cabinet): Promise<string> {
+    const res = await wbDataJson<{ taskId: string }>(cabinet, 'analytics', {
+        path: '/api/v1/warehouse_remains',
+        query: { groupByNm: true, groupBySize: true }
+    });
+    if (!res?.taskId) throw new Error('WB не вернул идентификатор задачи для отчёта об остатках');
+    return res.taskId;
+}
+
+async function remainsTaskStatus(cabinet: Cabinet, taskId: string): Promise<string> {
+    const res = await wbDataJson<{ id: string; status: string }>(cabinet, 'analytics', {
+        path: `/api/v1/warehouse_remains/tasks/${taskId}/status`
+    });
+    return res?.status ?? 'unknown';
+}
+
+async function downloadRemains(cabinet: Cabinet, taskId: string): Promise<RemainsRow[]> {
+    const rows = await wbJson<RemainsRow[]>(cabinet, 'analytics', {
+        path: `/api/v1/warehouse_remains/tasks/${taskId}/download`
+    });
+    return rows ?? [];
+}
+
+/** Полный отчёт об остатках по всем складам WB. Дорогая операция — кэшируйте. */
+export async function getWarehouseRemains(cabinet: Cabinet, maxWaitMs = 90_000): Promise<RemainsRow[]> {
+    const taskId = await createRemainsTask(cabinet);
+    const started = Date.now();
+    for (;;) {
+        const status = await remainsTaskStatus(cabinet, taskId);
+        if (status === 'done') return downloadRemains(cabinet, taskId);
+        if (status === 'purged' || status === 'canceled') {
+            throw new Error(`WB прекратил подготовку отчёта об остатках (статус «${status}»)`);
+        }
+        if (Date.now() - started > maxWaitMs) {
+            throw new Error('WB не успел подготовить отчёт об остатках. Попробуйте ещё раз через минуту.');
+        }
+        await sleep(3000);
+    }
+}
+
+// ─── Заказы FBS ──────────────────────────────────────────────────────────────
+
+export interface FbsOrder {
+    id: number;
+    rid: string;
+    orderUid: string;
+    article: string;
+    nmId: number;
+    chrtId: number;
+    skus: string[];
+    /** В копейках и в валюте заказа. Проверено: заказ 90200 = 902,00 ₽ при цене товара 1147 ₽. */
+    price: number;
+    /** Та же сумма в валюте продавца, тоже в копейках. */
+    convertedPrice: number;
+    /** Числовой код ISO 4217: 643 — рубль. */
+    currencyCode: number;
+    convertedCurrencyCode: number;
+    createdAt: string;
+    warehouseId: number;
+    deliveryType: string;
+    supplyId: string | null;
+    comment: string;
+    cargoType: number;
+    scanPrice: number | null;
+    colorCode: string;
+}
+
+export async function listFbsOrders(
+    cabinet: Cabinet,
+    params: { limit?: number; next?: number } = {}
+): Promise<{ orders: FbsOrder[]; next: number }> {
+    const res = await wbJson<{ orders: FbsOrder[]; next: number }>(cabinet, 'marketplace', {
+        path: '/api/v3/orders',
+        query: { limit: Math.min(params.limit ?? 50, 1000), next: params.next ?? 0 }
+    });
+    return { orders: res?.orders ?? [], next: res?.next ?? 0 };
 }

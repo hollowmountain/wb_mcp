@@ -1,4 +1,14 @@
-import type { Chat, ChatEvent, Feedback, Good, ProductCard, Question, ReturnClaim } from '../wb/api.js';
+import type {
+    Chat,
+    ChatEvent,
+    Feedback,
+    FbsOrder,
+    Good,
+    ProductCard,
+    Question,
+    RemainsRow,
+    ReturnClaim
+} from '../wb/api.js';
 
 const dash = '—';
 
@@ -141,9 +151,10 @@ const ISO_4217_NUMERIC: Record<string, string> = {
     '972': 'TJS'
 };
 
-function currencyName(code: string | undefined): string | undefined {
-    if (!code) return undefined;
-    return ISO_4217_NUMERIC[code] ?? code;
+function currencyName(code: string | number | undefined): string | undefined {
+    if (code === undefined || code === null || code === '') return undefined;
+    const key = String(code);
+    return ISO_4217_NUMERIC[key] ?? key;
 }
 
 function characteristic(c: { name: string; value: unknown }): string {
@@ -220,5 +231,54 @@ export function formatReturnClaim(c: ReturnClaim, index?: number): string {
     if (c.photos?.length) lines.push(`   Фото: ${c.photos.length} шт.`);
     if (c.delivery_dt) lines.push(`   Доставка: ${ts(c.delivery_dt)}`);
     lines.push(`   srid: ${c.srid}`);
+    return lines.join('\n');
+}
+
+/**
+ * Суммы в заказах приходят в копейках — в отличие от цен и возвратов, где рубли.
+ * Проверено сверкой: заказ на 90200 при цене товара 1147 ₽ и заявке на возврат
+ * того же товара на 889 ₽, то есть 902,00 ₽. Поэтому делим на 100.
+ */
+function kopecks(value: number | undefined, currency: string | undefined): string {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return dash;
+    const shown = (value / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `${shown} ${currency ?? ''}`.trim();
+}
+
+export function formatStockRow(r: RemainsRow, index?: number): string {
+    const head = index === undefined ? '' : `${index}. `;
+    const warehouses = (r.warehouses ?? []).filter(w => w.quantity > 0);
+    const total = warehouses.reduce((sum, w) => sum + w.quantity, 0);
+    const size = r.techSize && r.techSize !== '0' ? `, размер ${r.techSize}` : '';
+
+    const lines = [`${head}nmID ${r.nmId}${size} ${dash} всего ${total} шт.`];
+    if (r.vendorCode || r.subjectName) {
+        lines.push(`   ${[r.subjectName, r.vendorCode].filter(Boolean).join(', ')}`);
+    }
+    if (warehouses.length === 0) {
+        lines.push('   Нет ни на одном складе');
+    } else {
+        for (const w of warehouses.slice(0, 15)) lines.push(`   ${w.warehouseName}: ${w.quantity}`);
+        if (warehouses.length > 15) lines.push(`   … ещё складов: ${warehouses.length - 15}`);
+    }
+    return lines.join('\n');
+}
+
+export function formatFbsOrder(o: FbsOrder, index?: number): string {
+    const head = index === undefined ? '' : `${index}. `;
+    const lines = [
+        `${head}Заказ ${o.id} ${dash} ${ts(o.createdAt)}`,
+        `   Товар: nmID ${o.nmId}, артикул ${o.article || dash}`,
+        `   Сумма: ${kopecks(o.price, currencyName(o.currencyCode))}`
+    ];
+    // Валюта заказа отличается от валюты продавца только у трансграничных заказов —
+    // тогда пересчитанная сумма и есть та, что придёт продавцу.
+    if (o.convertedCurrencyCode !== o.currencyCode) {
+        lines.push(`   К зачислению: ${kopecks(o.convertedPrice, currencyName(o.convertedCurrencyCode))}`);
+    }
+    lines.push(`   Доставка: ${o.deliveryType || dash}${o.supplyId ? `, поставка ${o.supplyId}` : ''}`);
+    if (o.skus?.length) lines.push(`   Штрихкод: ${o.skus.join(', ')}`);
+    if (o.comment) lines.push(`   Комментарий: ${o.comment}`);
+    lines.push(`   rid: ${o.rid}`);
     return lines.join('\n');
 }
