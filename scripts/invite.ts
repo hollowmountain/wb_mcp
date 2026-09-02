@@ -44,10 +44,14 @@ const scope = (scopeArg ?? '')
     .map(s => s.trim().toLowerCase())
     .filter(Boolean);
 
-const unknown = scope.filter(s => !config.cabinets.has(s));
+// Область видимости может включать и кабинеты Wildberries, и кабинеты Ozon:
+// это разные площадки с раздельным доступом, слаги Ozon начинаются с oz-.
+const ozonSlugs = new Set(config.ozon.map(c => c.slug));
+const unknown = scope.filter(s => !config.cabinets.has(s) && !ozonSlugs.has(s));
 if (unknown.length > 0) {
+    const choices = [config.cabinets.describeChoices(), [...ozonSlugs].join(', ')].filter(Boolean).join(', ');
     console.error(`Неизвестные кабинеты: ${unknown.join(', ')}`);
-    console.error(`Доступны: ${config.cabinets.describeChoices()}`);
+    console.error(`Доступны: ${choices}`);
     process.exit(1);
 }
 
