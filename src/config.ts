@@ -76,8 +76,13 @@ if (allowedDomains.length === 0 && allowedEmails.length === 0 && env.IDENTITY_PR
  * Кабинеты задаются так:
  *   WB_CABINETS=main,opt
  *   WB_LABEL_MAIN=Основной кабинет
- *   WB_TOKEN_MAIN=eyJ...
+ *   WB_TOKEN_MAIN=eyJ...            узкий токен с записью: отзывы и чат
+ *   WB_DATA_TOKEN_MAIN=eyJ...       широкий токен только на чтение: данные
  *   WB_TOKEN_OPT=eyJ...
+ *
+ * Второй токен необязателен: без него кабинет работает как раньше, но
+ * инструменты по заказам, карточкам и остаткам для него недоступны.
+ * Почему токенов два — см. комментарий к Cabinet в wb/cabinets.ts.
  *
  * Для совместимости одиночный WB_TOKEN превращается в кабинет `main`.
  */
@@ -91,7 +96,7 @@ function buildRegistry(): CabinetRegistry {
                 'Не настроен ни один кабинет Wildberries. Задайте WB_CABINETS и WB_TOKEN_<SLUG>, либо одиночный WB_TOKEN.'
             );
         }
-        cabinets.push(buildCabinet('main', 'Кабинет Wildberries', env.WB_TOKEN));
+        cabinets.push(buildCabinet('main', 'Кабинет Wildberries', env.WB_TOKEN, process.env.WB_DATA_TOKEN?.trim()));
         return new CabinetRegistry(cabinets);
     }
 
@@ -101,7 +106,14 @@ function buildRegistry(): CabinetRegistry {
         if (!token) {
             throw new Error(`Кабинет «${slug}» объявлен в WB_CABINETS, но переменная WB_TOKEN_${key} пуста`);
         }
-        cabinets.push(buildCabinet(slug, process.env[`WB_LABEL_${key}`]?.trim() ?? '', token));
+        cabinets.push(
+            buildCabinet(
+                slug,
+                process.env[`WB_LABEL_${key}`]?.trim() ?? '',
+                token,
+                process.env[`WB_DATA_TOKEN_${key}`]?.trim()
+            )
+        );
     }
     return new CabinetRegistry(cabinets);
 }

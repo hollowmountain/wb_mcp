@@ -1,43 +1,91 @@
 import { TokenBucket } from './ratelimit.js';
-import { describeProblems, parseToken, type TokenInfo } from './token.js';
+import { describeProblems, parseToken, type CategoryKey, type TokenInfo } from './token.js';
 
 /**
- * Кабинет продавца Wildberries. У каждого свой токен и свои счётчики лимитов:
+ * Кабинет продавца Wildberries. У каждого свои токены и свои счётчики лимитов:
  * лимиты WB считаются на аккаунт продавца, поэтому общие вёдра на все кабинеты
  * искусственно тормозили бы работу.
+ *
+ * Токенов два, и это вынужденно. Признак «только чтение» в токене WB — один бит
+ * на весь токен (бит 30), а не настройка по категориям. Значит «отвечать
+ * покупателям, но остальное только смотреть» одним токеном не выражается.
+ * Отсюда пара:
+ *   token     — узкий, с записью: только отзывы и чат;
+ *   dataToken — широкий, только на чтение: заказы, карточки, цены, статистика.
+ * Если широкий токен утечёт, изменить им ничего нельзя, а тот, что умеет писать,
+ * дотягивается только до ответов покупателям.
  */
 export interface Cabinet {
     /** Короткий идентификатор для параметров инструментов: main, opt, detsky. */
     slug: string;
     /** Человеческое название, которое видит пользователь. */
     label: string;
+    /** Токен для ответов: отзывы и чат, с правом записи. */
     token: string;
     info: TokenInfo;
-    /** Проблемы токена, найденные при разборе. Пустой массив — всё хорошо. */
+    /** Проблемы токена ответов, найденные при разборе. Пустой массив — всё хорошо. */
     problems: string[];
-    buckets: {
-        feedbacks: TokenBucket;
-        chat: TokenBucket;
-        returns: TokenBucket;
-        common: TokenBucket;
-    };
+    /** Токен для чтения данных. null — кабинет настроен по-старому, данные недоступны. */
+    dataToken: string | null;
+    dataInfo: TokenInfo | null;
+    dataProblems: string[];
+    buckets: Record<BucketKey, TokenBucket>;
 }
 
-function makeBuckets(): Cabinet['buckets'] {
-    // feedbacks: 3 запроса в секунду, всплеск 6
-    // chat: 10 запросов за 10 секунд, всплеск 10
-    // returns: 20 запросов в минуту, всплеск 10
-    return {
-        feedbacks: new TokenBucket(6, 3),
-        chat: new TokenBucket(10, 1),
-        returns: new TokenBucket(10, 20 / 60),
-        common: new TokenBucket(10, 1)
-    };
+/** Области WB, у каждой свой хост и свои лимиты. */
+export type BucketKey =
+    | 'feedbacks'
+    | 'chat'
+    | 'returns'
+    | 'common'
+    | 'marketplace'
+    | 'content'
+    | 'prices'
+    | 'statistics'
+    | 'analytics'
+    | 'supplies'
+    | 'finance';
+
+/**
+ * Параметры вёдер: (ёмкость всплеска, пополнение в секунду).
+ *
+ * Для отзывов и чата взяты из документации лимитов персонального токена:
+ * https://dev.wildberries.ru/openapi/api-information
+ *
+ * Для остальных областей WB публикует лимиты неполно, поэтому значения
+ * намеренно занижены — лучше медленнее, чем ловить 429 и штрафовать ведро.
+ * Статистика проверена опытом 02.09.2026: два запроса подряд к
+ * statistics-api дали 429, поэтому у неё ведро на один запрос в минуту.
+ */
+const BUCKET_LIMITS: Record<BucketKey, [capacity: number, perSecond: number]> = {
+    feedbacks: [6, 3],
+    chat: [10, 1],
+    returns: [10, 20 / 60],
+    common: [10, 1],
+    marketplace: [10, 3],
+    content: [10, 1.5],
+    prices: [5, 1],
+    // Самая жёсткая область: один запрос в минуту, всплеска нет.
+    statistics: [1, 1 / 60],
+    analytics: [2, 1 / 20],
+    supplies: [5, 1],
+    finance: [5, 1]
+};
+
+function makeBuckets(): Record<BucketKey, TokenBucket> {
+    const buckets = {} as Record<BucketKey, TokenBucket>;
+    for (const [key, [capacity, perSecond]] of Object.entries(BUCKET_LIMITS)) {
+        buckets[key as BucketKey] = new TokenBucket(capacity, perSecond);
+    }
+    return buckets;
 }
 
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,23}$/;
 
-export function buildCabinet(slug: string, label: string, token: string): Cabinet {
+/** Категории, которые должны быть у широкого токена, чтобы от него был толк. */
+const DATA_CATEGORIES: CategoryKey[] = ['content', 'marketplace', 'prices', 'statistics'];
+
+export function buildCabinet(slug: string, label: string, token: string, dataToken?: string): Cabinet {
     if (!SLUG_RE.test(slug)) {
         throw new Error(
             `Некорректный идентификатор кабинета «${slug}»: разрешены строчные латинские буквы, цифры, дефис и подчёркивание, до 24 символов`
@@ -46,7 +94,38 @@ export function buildCabinet(slug: string, label: string, token: string): Cabine
     const info = parseToken(token);
     const problems = describeProblems(info, ['feedbacks', 'chat']);
 
-    return { slug, label: label || slug, token, info, problems, buckets: makeBuckets() };
+    let dataInfo: TokenInfo | null = null;
+    const dataProblems: string[] = [];
+    const trimmed = dataToken?.trim();
+    if (trimmed) {
+        dataInfo = parseToken(trimmed);
+        for (const key of DATA_CATEGORIES) {
+            if (!dataInfo.categories.has(key)) dataProblems.push(`нет доступа к категории «${key}»`);
+        }
+        if (!dataInfo.readOnly) {
+            // Не отказ: работать будет. Но широкий токен с записью — лишний риск,
+            // ради снижения которого вся эта пара токенов и заведена.
+            dataProblems.push('токен данных умеет записывать — безопаснее выпустить его «только на чтение»');
+        }
+        if (dataInfo.sellerId && info.sellerId && dataInfo.sellerId !== info.sellerId) {
+            dataProblems.push('токен данных выписан другим продавцом — проверьте, из того ли кабинета он взят');
+        }
+        if (dataInfo.expiresAt && dataInfo.expiresAt.getTime() < Date.now()) {
+            dataProblems.push(`срок действия истёк ${dataInfo.expiresAt.toISOString().slice(0, 10)}`);
+        }
+    }
+
+    return {
+        slug,
+        label: label || slug,
+        token,
+        info,
+        problems,
+        dataToken: trimmed || null,
+        dataInfo,
+        dataProblems,
+        buckets: makeBuckets()
+    };
 }
 
 export class CabinetRegistry {
@@ -84,6 +163,14 @@ export class CabinetRegistry {
         for (const cabinet of cabinets) {
             for (const problem of cabinet.problems) {
                 this.warnings.push(`Кабинет «${cabinet.slug}»: ${problem}`);
+            }
+            if (!cabinet.dataToken) {
+                this.warnings.push(
+                    `Кабинет «${cabinet.slug}»: не задан WB_DATA_TOKEN — заказы, карточки и остатки недоступны.`
+                );
+            }
+            for (const problem of cabinet.dataProblems) {
+                this.warnings.push(`Кабинет «${cabinet.slug}», токен данных: ${problem}`);
             }
         }
     }

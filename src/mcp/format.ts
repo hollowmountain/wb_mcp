@@ -1,4 +1,4 @@
-import type { Chat, ChatEvent, Feedback, Question } from '../wb/api.js';
+import type { Chat, ChatEvent, Feedback, Good, ProductCard, Question, ReturnClaim } from '../wb/api.js';
 
 const dash = '—';
 
@@ -109,4 +109,88 @@ export function formatChatEvent(e: ChatEvent, index?: number): string {
 
 export function joinBlocks(blocks: string[], emptyMessage: string): string {
     return blocks.length === 0 ? emptyMessage : blocks.join('\n\n');
+}
+
+/**
+ * Цены из discounts-prices-api приходят целыми числами. Судя по тому, что
+ * clubDiscountedPrice в том же ответе дробное, это рубли, а не копейки —
+ * поэтому здесь, в отличие от price(), на 100 не делим.
+ */
+function rub(value: number | undefined, currency: string | undefined): string {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return dash;
+    return `${value.toLocaleString('ru-RU')} ${currency ?? ''}`.trim();
+}
+
+function characteristic(c: { name: string; value: unknown }): string {
+    const v = Array.isArray(c.value) ? c.value.join(', ') : String(c.value ?? '');
+    return `${c.name}: ${v}`;
+}
+
+export function formatProductCard(card: ProductCard, good: Good | null): string {
+    const lines: string[] = [
+        `${card.title || card.vendorCode} ${dash} ${card.brand || dash}`,
+        `   nmID ${card.nmID}, артикул ${card.vendorCode}, предмет: ${card.subjectName || dash}`
+    ];
+
+    if (good) {
+        const sizes = good.sizes ?? [];
+        if (sizes.length === 1 && sizes[0]) {
+            const s = sizes[0];
+            lines.push(
+                `   Цена: ${rub(s.discountedPrice, good.currencyIsoCode4217)} со скидкой ${good.discount}% (до скидки ${rub(s.price, good.currencyIsoCode4217)})`
+            );
+        } else if (sizes.length > 1) {
+            lines.push(`   Цены по размерам:`);
+            for (const s of sizes.slice(0, 12)) {
+                lines.push(
+                    `      ${s.techSizeName || s.sizeID}: ${rub(s.discountedPrice, good.currencyIsoCode4217)} (до скидки ${rub(s.price, good.currencyIsoCode4217)})`
+                );
+            }
+        }
+    }
+
+    const sizes = card.sizes ?? [];
+    if (sizes.length > 0) {
+        const names = sizes.map(s => s.techSize || s.wbSize).filter(Boolean);
+        lines.push(`   Размеры: ${names.length > 0 ? names.join(', ') : `${sizes.length} шт. без обозначений`}`);
+        const barcodes = sizes.flatMap(s => s.skus ?? []);
+        if (barcodes.length > 0) lines.push(`   Штрихкоды: ${barcodes.slice(0, 6).join(', ')}${barcodes.length > 6 ? ' …' : ''}`);
+    }
+
+    const d = card.dimensions;
+    if (d) lines.push(`   Габариты: ${d.length}×${d.width}×${d.height} см, вес брутто ${d.weightBrutto} кг`);
+
+    const chars = card.characteristics ?? [];
+    if (chars.length > 0) {
+        lines.push(`   Характеристики (${chars.length}):`);
+        for (const c of chars.slice(0, 25)) lines.push(`      ${characteristic(c)}`);
+        if (chars.length > 25) lines.push(`      … ещё ${chars.length - 25}`);
+    }
+
+    if (card.description) {
+        const desc = card.description.length > 600 ? card.description.slice(0, 600) + '…' : card.description;
+        lines.push(`   Описание: ${desc}`);
+    }
+    if (card.photos?.length) lines.push(`   Фото: ${card.photos.length} шт.`);
+    lines.push(`   Обновлена: ${ts(card.updatedAt)}`);
+    return lines.join('\n');
+}
+
+export function formatReturnClaim(c: ReturnClaim, index?: number): string {
+    const head = index === undefined ? '' : `${index}. `;
+    const lines: string[] = [
+        `${head}Заявка ${c.id} ${dash} ${ts(c.dt)}`,
+        `   Товар: ${c.imt_name || dash} (nmID ${c.nm_id})`,
+        `   Сумма: ${rub(c.price, c.currency_code)} ${dash} заказ от ${ts(c.order_dt)}`,
+        // Числовые коды WB не расшифровывает в открытой документации, поэтому
+        // показываем как есть: врать про смысл статуса хуже, чем показать цифру.
+        `   Статус: код ${c.status} (расширенный ${c.status_ex}), тип заявки ${c.claim_type}`
+    ];
+    if (c.user_comment) lines.push(`   Покупатель: ${c.user_comment}`);
+    if (c.wb_comment) lines.push(`   Комментарий WB: ${c.wb_comment}`);
+    if (c.actions?.length) lines.push(`   Доступные действия: ${c.actions.join(', ')}`);
+    if (c.photos?.length) lines.push(`   Фото: ${c.photos.length} шт.`);
+    if (c.delivery_dt) lines.push(`   Доставка: ${ts(c.delivery_dt)}`);
+    lines.push(`   srid: ${c.srid}`);
+    return lines.join('\n');
 }

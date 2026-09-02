@@ -9,6 +9,10 @@ import type { Cabinet } from '../../wb/cabinets.js';
 import { CATEGORY_NAMES, daysLeft } from '../../wb/token.js';
 import {
     countFeedbacks,
+    getCardByNmId,
+    getGoodByNmId,
+    listClaims,
+    searchCards,
     countQuestions,
     countUnansweredFeedbacks,
     countUnansweredQuestions,
@@ -21,7 +25,15 @@ import {
     listFeedbacks,
     listQuestions
 } from '../../wb/api.js';
-import { formatChat, formatChatEvent, formatFeedback, formatQuestion, joinBlocks } from '../format.js';
+import {
+    formatChat,
+    formatChatEvent,
+    formatFeedback,
+    formatProductCard,
+    formatQuestion,
+    formatReturnClaim,
+    joinBlocks
+} from '../format.js';
 import { actorOf, guarded, text, toUnixSeconds, type ToolResult } from './common.js';
 import { locateFeedback, locateQuestion } from './resolve.js';
 
@@ -91,6 +103,18 @@ export function registerReadTools(server: McpServer): void {
                     `   Категории: ${cats || 'нет'}`
                 ];
                 if (c.problems.length > 0) lines.push(`   ⚠ ${c.problems.join('; ')}`);
+
+                if (c.dataInfo) {
+                    const dataDays = daysLeft(c.dataInfo);
+                    const dataCats = [...c.dataInfo.categories].map(k => CATEGORY_NAMES[k]).join(', ');
+                    lines.push(
+                        `   Токен данных: ${c.dataInfo.readOnly ? 'только чтение' : 'ЧТЕНИЕ И ЗАПИСЬ'}, истекает ${c.dataInfo.expiresAt?.toISOString().slice(0, 10) ?? '?'}${dataDays === null ? '' : ` (осталось ${dataDays} дн.)`}`,
+                        `   Данные доступны: ${dataCats || 'нет'}`
+                    );
+                    if (c.dataProblems.length > 0) lines.push(`   ⚠ токен данных: ${c.dataProblems.join('; ')}`);
+                } else {
+                    lines.push('   Токен данных не задан — заказы, карточки, цены и возвраты недоступны');
+                }
                 return lines.join('\n');
             });
             return text(blocks.join('\n\n'));
@@ -362,6 +386,74 @@ export function registerReadTools(server: McpServer): void {
                 const header = `Событий получено: ${res.totalEvents}. Курсор для следующего запроса: ${res.next}.`;
                 const blocks = res.events.map((e, i) => formatChatEvent(e, i + 1));
                 return `${header}\n\n${joinBlocks(blocks, 'Новых событий в чатах нет.')}`;
+            })
+        )
+    );
+
+    server.registerTool(
+        'wb_product',
+        {
+            title: 'Карточка товара',
+            description:
+                'Карточка товара: характеристики, состав, размеры, штрихкоды, габариты и текущая цена со скидкой. Ищет по nmID (он есть в каждом отзыве и вопросе) либо по артикулу продавца. Берите этот инструмент, когда покупатель спрашивает про состав, размер, комплектацию или цену.',
+            inputSchema: {
+                nmId: z
+                    .number()
+                    .int()
+                    .positive()
+                    .optional()
+                    .describe('Номенклатура WB (nmID). Указана в каждом отзыве и вопросе.'),
+                article: z
+                    .string()
+                    .optional()
+                    .describe('Артикул продавца или его часть. Вернутся все совпадения.'),
+                cabinet: cabinetRequiredArg
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('wb_product', async (args, extra) => {
+            if (args.nmId === undefined && !args.article?.trim()) {
+                return text('Укажите nmId или article — без одного из них искать нечего.');
+            }
+            return overCabinets(actorOf(extra), args.cabinet, async cabinet => {
+                if (args.nmId !== undefined) {
+                    const card = await getCardByNmId(cabinet, args.nmId);
+                    if (!card) return `Товар nmID ${args.nmId} в этом кабинете не найден.`;
+                    const good = await getGoodByNmId(cabinet, args.nmId);
+                    return formatProductCard(card, good);
+                }
+                const cards = await searchCards(cabinet, args.article!.trim(), 10);
+                if (cards.length === 0) return `По запросу «${args.article}» ничего не найдено.`;
+                const blocks = await Promise.all(
+                    cards.map(async card => formatProductCard(card, await getGoodByNmId(cabinet, card.nmID)))
+                );
+                return joinBlocks(blocks, 'Ничего не найдено');
+            });
+        })
+    );
+
+    server.registerTool(
+        'wb_returns',
+        {
+            title: 'Заявки на возврат',
+            description:
+                'Заявки покупателей на возврат товара: что вернули, почему, на какую сумму и в каком состоянии заявка. По всем кабинетам, если не указан конкретный.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                archive: z
+                    .boolean()
+                    .optional()
+                    .describe('true — показать архивные, уже закрытые заявки. По умолчанию только активные.'),
+                limit: z.number().int().min(1).max(200).optional().describe('Сколько заявок вернуть, по умолчанию 20')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('wb_returns', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
+                const page = await listClaims(cabinet, { archive: args.archive, limit: args.limit });
+                const blocks = page.claims.map((c, i) => formatReturnClaim(c, i + 1));
+                const head = `Заявок ${args.archive ? 'в архиве' : 'активных'}: ${page.total}`;
+                return `${head}\n\n${joinBlocks(blocks, 'Заявок нет')}`;
             })
         )
     );
