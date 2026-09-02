@@ -6,13 +6,15 @@ import type { Actor } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { kvGet, kvSet } from '../../db/index.js';
 import type { Cabinet } from '../../wb/cabinets.js';
-import type { RemainsRow } from '../../wb/api.js';
+import type { RegionLevel, RemainsRow } from '../../wb/api.js';
 import { CATEGORY_NAMES, daysLeft } from '../../wb/token.js';
 import {
     countFeedbacks,
     getCardByNmId,
     getGoodByNmId,
+    getRegionSales,
     getWarehouseRemains,
+    groupRegionSales,
     listFbsOrders,
     splitRemains,
     listClaims,
@@ -36,6 +38,7 @@ import {
     formatFbsOrder,
     formatProductCard,
     formatQuestion,
+    formatRegionSales,
     formatReturnClaim,
     formatStockRow,
     joinBlocks
@@ -550,6 +553,39 @@ export function registerReadTools(server: McpServer): void {
                         : `Заказов по nmID ${args.nmId}: ${picked.length} из ${orders.length} просмотренных`;
                 const tail = picked.length > 30 ? `\n\n… ещё заказов: ${picked.length - 30}` : '';
                 return `${head}\n\n${joinBlocks(blocks, 'Заказов нет')}${tail}`;
+            })
+        )
+    );
+
+    server.registerTool(
+        'wb_regions',
+        {
+            title: 'Продажи по географии',
+            description:
+                'Куда уходят продажи: по странам, федеральным округам, регионам или городам. Суммы, штуки и доля каждой точки. Можно сузить до одной номенклатуры.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
+                dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
+                level: z
+                    .enum(['country', 'district', 'region', 'city'])
+                    .optional()
+                    .describe('Уровень свода. По умолчанию region — регионы.'),
+                nmId: z.number().int().positive().optional().describe('Показать только по этой номенклатуре'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько строк показать, по умолчанию 15')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('wb_regions', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
+                const rows = await getRegionSales(cabinet, args.dateFrom, args.dateTo);
+                const picked = args.nmId === undefined ? rows : rows.filter(r => r.nmID === args.nmId);
+                if (args.nmId !== undefined && picked.length === 0) {
+                    return `По номенклатуре ${args.nmId} продаж за период не было.`;
+                }
+                const level: RegionLevel = args.level ?? 'region';
+                const totals = groupRegionSales(picked, level);
+                return formatRegionSales(totals, level, { from: args.dateFrom, to: args.dateTo }, args.limit ?? 15);
             })
         )
     );

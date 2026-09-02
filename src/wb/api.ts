@@ -537,3 +537,71 @@ export function splitRemains(row: RemainsRow): StockBreakdown {
     // на случай, если строку не прислали.
     return { onHand: declaredTotal ?? summed, toCustomers, returning, warehouses };
 }
+
+// ─── Продажи по регионам ─────────────────────────────────────────────────────
+
+export interface RegionSaleRow {
+    countryName: string;
+    /** Федеральный округ. У зарубежных продаж пустой. */
+    foName: string;
+    regionName: string;
+    cityName: string;
+    nmID: number;
+    /** Артикул продавца. */
+    sa: string;
+    /** Сумма в рублях. Проверено: доли saleInvoiceCostPricePerc в сумме дают 100. */
+    saleInvoiceCostPrice: number;
+    saleInvoiceCostPricePerc: number;
+    saleItemInvoiceQty: number;
+}
+
+export async function getRegionSales(
+    cabinet: Cabinet,
+    dateFrom: string,
+    dateTo: string
+): Promise<RegionSaleRow[]> {
+    const res = await wbJson<{ report: RegionSaleRow[] }>(cabinet, 'analytics', {
+        path: '/api/v1/analytics/region-sale',
+        query: { dateFrom, dateTo }
+    });
+    return res?.report ?? [];
+}
+
+export type RegionLevel = 'country' | 'district' | 'region' | 'city';
+
+export interface RegionTotal {
+    name: string;
+    amount: number;
+    quantity: number;
+    share: number;
+}
+
+/**
+ * Отчёт приходит построчно по городам и номенклатурам — на две недели это
+ * больше двух тысяч строк. Модели такое отдавать нельзя, поэтому сводим
+ * к выбранному уровню и считаем доли сами, а не берём готовые проценты:
+ * при фильтре по номенклатуре доли WB относятся ко всему обороту, а не к выборке.
+ */
+export function groupRegionSales(rows: RegionSaleRow[], level: RegionLevel): RegionTotal[] {
+    const pick = (r: RegionSaleRow): string => {
+        if (level === 'country') return r.countryName || 'не указана';
+        if (level === 'district') return r.foName || r.countryName || 'не указан';
+        if (level === 'region') return r.regionName || r.countryName || 'не указан';
+        return r.cityName || 'не указан';
+    };
+
+    const acc = new Map<string, { amount: number; quantity: number }>();
+    let total = 0;
+    for (const r of rows) {
+        const key = pick(r);
+        const cur = acc.get(key) ?? { amount: 0, quantity: 0 };
+        cur.amount += r.saleInvoiceCostPrice ?? 0;
+        cur.quantity += r.saleItemInvoiceQty ?? 0;
+        acc.set(key, cur);
+        total += r.saleInvoiceCostPrice ?? 0;
+    }
+
+    return [...acc.entries()]
+        .map(([name, v]) => ({ name, amount: v.amount, quantity: v.quantity, share: total > 0 ? (v.amount / total) * 100 : 0 }))
+        .sort((a, b) => b.amount - a.amount);
+}

@@ -1,4 +1,5 @@
 import { splitRemains } from '../wb/api.js';
+import type { RegionLevel, RegionTotal } from '../wb/api.js';
 import type {
     Chat,
     ChatEvent,
@@ -287,5 +288,40 @@ export function formatFbsOrder(o: FbsOrder, index?: number): string {
     if (o.skus?.length) lines.push(`   Штрихкод: ${o.skus.join(', ')}`);
     if (o.comment) lines.push(`   Комментарий: ${o.comment}`);
     lines.push(`   rid: ${o.rid}`);
+    return lines.join('\n');
+}
+
+const REGION_LEVEL_TITLE: Record<RegionLevel, string> = {
+    country: 'странам',
+    district: 'федеральным округам',
+    region: 'регионам',
+    city: 'городам'
+};
+
+export function formatRegionSales(
+    totals: RegionTotal[],
+    level: RegionLevel,
+    period: { from: string; to: string },
+    limit: number
+): string {
+    if (totals.length === 0) return `Продаж за период ${period.from} — ${period.to} не найдено.`;
+
+    const amount = totals.reduce((s, t) => s + t.amount, 0);
+    const quantity = totals.reduce((s, t) => s + t.quantity, 0);
+    const shown = totals.slice(0, limit);
+
+    const lines = [
+        `Продажи по ${REGION_LEVEL_TITLE[level]} за ${period.from} — ${period.to}`,
+        `Всего: ${rub(amount, 'RUB')}, ${quantity} шт., точек ${totals.length}`,
+        ''
+    ];
+    for (const [i, t] of shown.entries()) {
+        lines.push(`${i + 1}. ${t.name} ${dash} ${rub(t.amount, 'RUB')} (${t.share.toFixed(1)}%), ${t.quantity} шт.`);
+    }
+    if (totals.length > shown.length) {
+        const rest = totals.slice(limit);
+        const restAmount = rest.reduce((s, t) => s + t.amount, 0);
+        lines.push(`… остальные ${rest.length}: ${rub(restAmount, 'RUB')}`);
+    }
     return lines.join('\n');
 }
