@@ -7,7 +7,7 @@ import { db, newId, now } from '../db/index.js';
 import { cabinetScopeOf } from '../auth/provider.js';
 import { identity } from '../auth/identity/index.js';
 import type { VerifiedIdentity } from '../auth/identity/types.js';
-import { deniedPage, expiredPanelPage, PENDING_TTL_SECONDS } from '../auth/pages.js';
+import { deniedPage, PENDING_TTL_SECONDS } from '../auth/pages.js';
 
 const COOKIE_NAME = 'mcpwb_panel';
 /** Префикс идентификатора заявки на вход в панель. */
@@ -114,14 +114,17 @@ export async function completePanelLogin(
         | PendingRow
         | undefined;
 
+    // Тупиковая страница здесь только раздражает: человек уже ввёл верный код,
+    // просто форма пришла из кэша браузера. Отправляем на свежую форму —
+    // /panel/login всегда заводит новую заявку, зациклиться нельзя.
     if (!row) {
-        res.status(400).send(expiredPanelPage());
+        res.redirect('/panel/login');
         return;
     }
     db.prepare('DELETE FROM pending_auth WHERE id = ?').run(pendingId);
 
     if (row.created_at < now() - PENDING_TTL_SECONDS) {
-        res.status(400).send(expiredPanelPage());
+        res.redirect('/panel/login');
         return;
     }
 

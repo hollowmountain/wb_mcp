@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="refresh" content="120">
+<meta name="color-scheme" content="light dark">
+<title>Панель коннектора</title>
+<style>
+  :root { color-scheme: light dark; --line: color-mix(in srgb, CanvasText 14%, Canvas);
+          --muted: color-mix(in srgb, CanvasText 60%, Canvas);
+          --soft: color-mix(in srgb, CanvasText 5%, Canvas); }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         margin: 0; background: Canvas; color: CanvasText; -webkit-text-size-adjust: 100%; }
+  .wrap { max-width: 68rem; margin: 0 auto;
+          padding: 1.5rem max(1rem, env(safe-area-inset-left)) 4rem; }
+  header.top { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline;
+               justify-content: space-between; margin-bottom: .35rem; }
+  h1 { font-size: 1.3rem; margin: 0; }
+  h2 { font-size: 1.05rem; margin: 2.25rem 0 .75rem; padding-bottom: .4rem; border-bottom: 1px solid var(--line); }
+  h3 { font-size: 1rem; margin: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: .85rem; }
+  .err { color: #c0392b; }
+  code { background: var(--soft); padding: .1em .35em; border-radius: 4px;
+         font-size: .88em; overflow-wrap: anywhere; }
+  a { color: inherit; }
+  ul.plain { list-style: none; padding: 0; margin: .5rem 0 0; }
+  ul.plain li { margin: .3rem 0; }
+
+  .summary { display: grid; gap: .75rem 1.25rem; padding: 1rem;
+             grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+             background: var(--soft); border-radius: 10px; margin-top: 1rem; }
+  .summary.tight { grid-template-columns: repeat(auto-fit, minmax(6rem, 1fr)); }
+  .summary div { display: flex; flex-direction: column; }
+  .summary b { font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+  .summary span { color: var(--muted); font-size: .82rem; }
+
+  .cards { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 1rem; }
+  .card header { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; margin-bottom: .4rem; }
+  .card p { margin: .35rem 0; }
+  .toks { display: grid; gap: .6rem; margin-top: .7rem; }
+  .tok { border: 1px solid var(--line); border-radius: 8px; padding: .55rem .7rem; }
+  .tok-h { font-size: .8rem; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+  .nums { display: grid; grid-template-columns: repeat(3, 1fr); gap: .75rem;
+          margin-top: .8rem; padding-top: .8rem; border-top: 1px solid var(--line); }
+  .nums div { display: flex; flex-direction: column; }
+  .nums b { font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+  .nums span { color: var(--muted); font-size: .78rem; }
+
+  .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px;
+           font-size: .78rem; white-space: nowrap; border: 1px solid transparent; }
+  .badge.ok   { background: color-mix(in srgb, #2e7d32 16%, Canvas); color: #2e7d32; }
+  .badge.warn { background: color-mix(in srgb, #b26a00 16%, Canvas); color: #b26a00; }
+  .badge.bad  { background: color-mix(in srgb, #c0392b 16%, Canvas); color: #c0392b; }
+  .badge.mute { background: var(--soft); color: var(--muted); }
+
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+
+  /* На телефоне таблицы разворачиваются в карточки: горизонтальная прокрутка
+     на узком экране означает, что половину данных никто не увидит. */
+  @media (max-width: 46rem) {
+    .wrap { padding-top: 1rem; }
+    h1 { font-size: 1.15rem; }
+    thead, th { display: none; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    tr { border: 1px solid var(--line); border-radius: 10px; padding: .35rem .1rem; margin-bottom: .6rem; }
+    td { border: 0; padding: .3rem .7rem; display: grid; grid-template-columns: 8.5rem 1fr; gap: .5rem; }
+    td::before { content: attr(data-l); color: var(--muted); font-size: .82rem; }
+    td[colspan] { grid-template-columns: 1fr; }
+    td[colspan]::before { content: none; }
+    .nums { grid-template-columns: repeat(3, 1fr); }
+  }
+</style>
+</head>
+<body><div class="wrap">
+
+<header class="top">
+  <h1>Панель коннектора</h1>
+  <span class="muted small">tartaria4545@gmail.com · admin · <a href="/panel/logout">выйти</a></span>
+</header>
+<p class="muted small">Данные на 2026-09-02 18:23 UTC. Страница обновляется сама каждые 2 минуты.</p>
+
+<div class="summary">
+  <div><b>22</b><span>отзывов ждут ответа</span></div>
+  <div><b>3</b><span>вопросов ждут ответа</span></div>
+  <div><b>794</b><span>чатов с покупателями</span></div>
+  <div><b>3</b><span>кабинетов WB</span></div>
+  <div><b>38</b><span>черновиков ждут отправки</span></div>
+  <div><b>42</b><span>ответов отправлено всего</span></div>
+</div>
+
+<h2>Что умеет коннектор</h2>
+<div class="scroll"><table>
+  <thead><tr><th>Возможность</th><th>Что даёт</th><th>Меняет ли что-то</th></tr></thead>
+  <tbody><tr><td data-l="Возможность">Сводка обращений</td>
+              <td data-l="Что даёт" class="muted">сколько отзывов и вопросов ждут ответа, сколько открытых чатов</td>
+              <td data-l="Меняет"><span class="badge ok">только чтение</span></td></tr><tr><td data-l="Возможность">Отзывы и вопросы</td>
+              <td data-l="Что даёт" class="muted">списки, поиск по номеру, архив, непросмотренные</td>
+              <td data-l="Меняет"><span class="badge ok">только чтение</span></td></tr><tr><td data-l="Возможность">Чаты с покупателями</td>
+              <td data-l="Что даёт" class="muted">список чатов и лента сообщений</td>
+              <td data-l="Меняет"><span class="badge ok">только чтение</span></td></tr><tr><td data-l="Возможность">Карточка товара</td>
+              <td data-l="Что даёт" class="muted">характеристики, состав, размеры, штрихкоды, габариты, цена со скидкой</td>
+              <td data-l="Меняет"><span class="badge ok">только чтение</span></td></tr><tr><td data-l="Возможность">Остатки на складах</td>
+              <td data-l="Что даёт" class="muted">сколько лежит на каждом складе WB, отдельно — что едет покупателям</td>
+              <td data-l="Меняет"><span class="badge ok">только чтение</span></td></tr><tr><td data-l="Возможность">Заказы FBS</td>
+              <td data-l="Что даёт" class="muted">сборочные задания со склада продавца</td>
+              <td data-l="Меняет"><span class="badge ok">только чтение</span></td></tr><tr><td data-l="Возможность">Заявки на возврат</td>
+              <td data-l="Что даёт" class="muted">что возвращают, почему, на какую сумму</td>
+              <td data-l="Меняет"><span class="badge ok">только чтение</span></td></tr><tr><td data-l="Возможность">Продажи по географии</td>
+              <td data-l="Что даёт" class="muted">страны, округа, регионы, города — суммы, штуки, доли</td>
+              <td data-l="Меняет"><span class="badge ok">только чтение</span></td></tr><tr><td data-l="Возможность">Ответ покупателю</td>
+              <td data-l="Что даёт" class="muted">готовит черновик; отправка — отдельным подтверждением человека</td>
+              <td data-l="Меняет"><span class="badge warn">с подтверждением</span></td></tr></tbody>
+</table></div>
+<p class="muted small">Ответ покупателю всегда проходит через черновик: модель готовит текст, человек читает и подтверждает. Сама она ничего не отправляет.</p>
+
+<h2>Кабинеты Wildberries</h2>
+<div class="cards"><article class="card">
+  <header>
+    <h3>Your Beauty</h3>
+    <code>beauty</code>
+  </header>
+  <p class="muted small">ООО &quot;КРАСОТА&quot; · бренд Your Beauty · ИНН 2311215683</p>
+  <div class="toks"><div class="tok">
+      <div class="tok-h">Токен ответов</div>
+      <p><span class="badge ok">персональный</span> <span class="badge warn">чтение и запись</span> <span class="badge mute">181 дн. до истечения</span></p>
+      <p class="muted small">Вопросы и отзывы, Чат с покупателями</p>
+      
+    </div><div class="tok">
+      <div class="tok-h">Токен данных</div>
+      <p><span class="badge ok">персональный</span> <span class="badge ok">только чтение</span> <span class="badge mute">181 дн. до истечения</span></p>
+      <p class="muted small">Контент, Аналитика, Цены и скидки, Маркетплейс, Статистика, Продвижение, Вопросы и отзывы, Чат с покупателями, Поставки, Возвраты покупателями, Финансы, Пользователи</p>
+      <p class="err small">токен данных выписан другим продавцом — проверьте, из того ли кабинета он взят</p>
+    </div></div>
+  <div class="nums">
+               <div><b>9</b><span>отзывов без ответа</span></div>
+               <div><b>1</b><span>вопросов без ответа</span></div>
+               <div><b>300</b><span>чатов</span></div>
+             </div>
+</article><article class="card">
+  <header>
+    <h3>HARBEZ</h3>
+    <code>harbez</code>
+  </header>
+  <p class="muted small">ИП Арасланов А. Г. · бренд HARBEZ · ИНН 744403658154</p>
+  <div class="toks"><div class="tok">
+      <div class="tok-h">Токен ответов</div>
+      <p><span class="badge ok">персональный</span> <span class="badge warn">чтение и запись</span> <span class="badge mute">181 дн. до истечения</span></p>
+      <p class="muted small">Вопросы и отзывы, Чат с покупателями</p>
+      
+    </div><div class="tok">
+      <div class="tok-h">Токен данных</div>
+      <p><span class="badge ok">персональный</span> <span class="badge ok">только чтение</span> <span class="badge mute">181 дн. до истечения</span></p>
+      <p class="muted small">Контент, Аналитика, Цены и скидки, Маркетплейс, Статистика, Продвижение, Вопросы и отзывы, Чат с покупателями, Поставки, Возвраты покупателями, Финансы, Пользователи</p>
+      <p class="err small">токен данных выписан другим продавцом — проверьте, из того ли кабинета он взят</p>
+    </div></div>
+  <div class="nums">
+               <div><b>13</b><span>отзывов без ответа</span></div>
+               <div><b>1</b><span>вопросов без ответа</span></div>
+               <div><b>206</b><span>чатов</span></div>
+             </div>
+</article><article class="card">
+  <header>
+    <h3>PixelTap</h3>
+    <code>pixeltap</code>
+  </header>
+  <p class="muted small">ИП Арасланова З. Г. · бренд PixelTap · ИНН 744402248532</p>
+  <div class="toks"><div class="tok">
+      <div class="tok-h">Токен ответов</div>
+      <p><span class="badge ok">персональный</span> <span class="badge warn">чтение и запись</span> <span class="badge mute">181 дн. до истечения</span></p>
+      <p class="muted small">Вопросы и отзывы, Чат с покупателями</p>
+      
+    </div><div class="tok">
+      <div class="tok-h">Токен данных</div>
+      <p><span class="badge ok">персональный</span> <span class="badge ok">только чтение</span> <span class="badge mute">181 дн. до истечения</span></p>
+      <p class="muted small">Контент, Аналитика, Цены и скидки, Маркетплейс, Статистика, Продвижение, Вопросы и отзывы, Чат с покупателями, Поставки, Возвраты покупателями, Финансы, Пользователи</p>
+      <p class="err small">токен данных выписан другим продавцом — проверьте, из того ли кабинета он взят</p>
+    </div></div>
+  <div class="nums">
+               <div><b>0</b><span>отзывов без ответа</span></div>
+               <div><b>1</b><span>вопросов без ответа</span></div>
+               <div><b>288</b><span>чатов</span></div>
+             </div>
+</article></div>
+<p class="muted small">Токенов два намеренно. Узкий умеет отвечать, но видит только отзывы и чаты. Широкий видит товары, заказы и остатки, но ничего не может изменить.</p>
+
+<h2>Кабинеты Ozon</h2>
+<div class="cards"><article class="card">
+  <header><h3>Pixeltap</h3><code>beauty</code></header>
+  <p class="muted small">ООО &quot;КРАСОТА&quot;</p>
+  <p><span class="badge ok">Premium</span></p>
+  <ul class="plain">
+        <li><span class="badge warn">закрыто</span> Отзывы <span class="muted small">— нужен «Управление отзывами» или Premium Pro</span></li>
+        <li><span class="badge warn">закрыто</span> Вопросы <span class="muted small">— нужен Premium Plus</span></li>
+        <li><span class="badge ok">доступно</span> Чаты — чтение</li>
+      </ul>
+</article><article class="card">
+  <header><h3>HARBEZ</h3><code>harbez</code></header>
+  <p class="muted small">Арасланов Альберт Гильмуллович</p>
+  <p><span class="badge ok">Premium</span></p>
+  <ul class="plain">
+        <li><span class="badge warn">закрыто</span> Отзывы <span class="muted small">— нужен «Управление отзывами» или Premium Pro</span></li>
+        <li><span class="badge warn">закрыто</span> Вопросы <span class="muted small">— нужен Premium Plus</span></li>
+        <li><span class="badge ok">доступно</span> Чаты — чтение</li>
+      </ul>
+</article><article class="card">
+  <header><h3>Pixeltapic</h3><code>pixeltap</code></header>
+  <p class="muted small">Арасланова Зульфия Гильмулловна</p>
+  <p><span class="badge ok">Premium</span></p>
+  <ul class="plain">
+        <li><span class="badge warn">закрыто</span> Отзывы <span class="muted small">— нужен «Управление отзывами» или Premium Pro</span></li>
+        <li><span class="badge warn">закрыто</span> Вопросы <span class="muted small">— нужен Premium Plus</span></li>
+        <li><span class="badge ok">доступно</span> Чаты — чтение</li>
+      </ul>
+</article></div>
+<p class="muted small">Ключи выпущены с ролью «только чтение». Отзывы и вопросы Ozon отдаёт лишь по платной подписке — что именно закрыто, видно на карточке.</p>
+
+<h2>Очередь черновиков</h2>
+<div class="summary tight"><div><b>17</b><span>pixeltap</span></div><div><b>11</b><span>beauty</span></div><div><b>9</b><span>harbez</span></div><div><b>1</b><span>main</span></div></div>
+<p class="muted small">Черновик ждёт человека: пока никто не подтвердил, покупателю ничего не ушло.</p>
+
+<h2>Какие API используются</h2>
+<div class="scroll"><table>
+  <thead><tr><th>Хост</th><th>Категория</th><th>Токен</th><th>Лимит</th><th>Что берём</th></tr></thead>
+  <tbody><tr><td data-l="Хост"><code>feedbacks-api.wildberries.ru</code></td>
+              <td data-l="Категория">Вопросы и отзывы</td>
+              <td data-l="Токен">ответов</td>
+              <td data-l="Лимит">3 запроса/сек, всплеск 6</td>
+              <td data-l="Что берём" class="muted">отзывы, вопросы, ответы на них</td></tr><tr><td data-l="Хост"><code>buyer-chat-api.wildberries.ru</code></td>
+              <td data-l="Категория">Чат с покупателями</td>
+              <td data-l="Токен">ответов</td>
+              <td data-l="Лимит">10 запросов/10 сек</td>
+              <td data-l="Что берём" class="muted">список чатов, лента событий, отправка сообщений</td></tr><tr><td data-l="Хост"><code>common-api.wildberries.ru</code></td>
+              <td data-l="Категория">любая</td>
+              <td data-l="Токен">ответов</td>
+              <td data-l="Лимит">10 запросов/10 сек</td>
+              <td data-l="Что берём" class="muted">информация о продавце</td></tr><tr><td data-l="Хост"><code>returns-api.wildberries.ru</code></td>
+              <td data-l="Категория">Возвраты покупателями</td>
+              <td data-l="Токен">данных</td>
+              <td data-l="Лимит">20 запросов/мин</td>
+              <td data-l="Что берём" class="muted">заявки покупателей на возврат</td></tr><tr><td data-l="Хост"><code>content-api.wildberries.ru</code></td>
+              <td data-l="Категория">Контент</td>
+              <td data-l="Токен">данных</td>
+              <td data-l="Лимит">сдержанно, точный лимит WB не публикует</td>
+              <td data-l="Что берём" class="muted">карточки товаров, характеристики, размеры</td></tr><tr><td data-l="Хост"><code>discounts-prices-api.wildberries.ru</code></td>
+              <td data-l="Категория">Цены и скидки</td>
+              <td data-l="Токен">данных</td>
+              <td data-l="Лимит">сдержанно, точный лимит WB не публикует</td>
+              <td data-l="Что берём" class="muted">цены, скидки, артикул по номенклатуре</td></tr><tr><td data-l="Хост"><code>marketplace-api.wildberries.ru</code></td>
+              <td data-l="Категория">Маркетплейс</td>
+              <td data-l="Токен">данных</td>
+              <td data-l="Лимит">сдержанно, точный лимит WB не публикует</td>
+              <td data-l="Что берём" class="muted">сборочные задания FBS, склады</td></tr><tr><td data-l="Хост"><code>seller-analytics-api.wildberries.ru</code></td>
+              <td data-l="Категория">Аналитика</td>
+              <td data-l="Токен">данных</td>
+              <td data-l="Лимит">10 запросов/мин</td>
+              <td data-l="Что берём" class="muted">остатки по складам, продажи по географии</td></tr><tr><td data-l="Хост"><code>statistics-api.wildberries.ru</code></td>
+              <td data-l="Категория">Статистика</td>
+              <td data-l="Токен">данных</td>
+              <td data-l="Лимит">1 запрос в 5 минут — так отвечает сам WB</td>
+              <td data-l="Что берём" class="muted">заказы и продажи по датам, отчёт о реализации</td></tr><tr><td data-l="Хост"><code>supplies-api.wildberries.ru</code></td>
+              <td data-l="Категория">Поставки</td>
+              <td data-l="Токен">данных</td>
+              <td data-l="Лимит">сдержанно, точный лимит WB не публикует</td>
+              <td data-l="Что берём" class="muted">поставки FBW</td></tr><tr><td data-l="Хост"><code>finance-api.wildberries.ru</code></td>
+              <td data-l="Категория">Финансы</td>
+              <td data-l="Токен">данных</td>
+              <td data-l="Лимит">сдержанно, точный лимит WB не публикует</td>
+              <td data-l="Что берём" class="muted">баланс продавца</td></tr></tbody>
+</table></div>
+<p class="muted small">Лимиты считаются на аккаунт продавца, поэтому у каждого кабинета свои счётчики.</p>
+
+<h2>Кто имеет доступ</h2>
+<div class="scroll"><table>
+  <thead><tr><th>Почта</th><th>Роль</th><th>Кабинеты</th><th>Последний вход</th></tr></thead>
+  <tbody><tr><td data-l="Почта">tartaria4545@gmail.com</td>
+                  <td data-l="Роль">admin</td>
+                  <td data-l="Кабинеты">все</td>
+                  <td data-l="Последний вход" class="muted">2026-09-02 18:21 UTC</td></tr><tr><td data-l="Почта">wb-beauty@harbez.com</td>
+                  <td data-l="Роль">responder</td>
+                  <td data-l="Кабинеты">beauty,pixeltap</td>
+                  <td data-l="Последний вход" class="muted">2026-09-02 16:09 UTC</td></tr><tr><td data-l="Почта">wb-harbez@harbez.com</td>
+                  <td data-l="Роль">responder</td>
+                  <td data-l="Кабинеты">harbez</td>
+                  <td data-l="Последний вход" class="muted">2026-09-02 18:16 UTC</td></tr></tbody>
+</table></div>
+<p class="muted small">Роль <code>reader</code> может только читать: отправка ответов недоступна.</p>
+
+<h2>Последние действия</h2>
+<div class="scroll"><table>
+  <thead><tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Кабинет</th><th>Итог</th></tr></thead>
+  <tbody><tr><td data-l="Когда" class="muted">2026-09-02 18:21 UTC</td>
+                  <td data-l="Кто">tartaria4545@gmail.com</td>
+                  <td data-l="Действие">вход в панель</td>
+                  <td data-l="Кабинет"><span class="muted">не относится</span></td>
+                  <td data-l="Итог"><span class="badge ok">ok</span></td></tr><tr><td data-l="Когда" class="muted">2026-09-02 18:08 UTC</td>
+                  <td data-l="Кто">wb-harbez@harbez.com</td>
+                  <td data-l="Действие">ОТПРАВЛЕН ответ на отзыв</td>
+                  <td data-l="Кабинет">harbez</td>
+                  <td data-l="Итог"><span class="badge ok">ok</span></td></tr><tr><td data-l="Когда" class="muted">2026-09-02 17:53 UTC</td>
+                  <td data-l="Кто">wb-beauty@harbez.com</td>
+                  <td data-l="Действие">черновик ответа на вопрос</td>
+                  <td data-l="Кабинет">beauty</td>
+                  <td data-l="Итог"><span class="badge ok">ok</span></td></tr></tbody>
+</table></div>
+<p class="muted small">Вход в коннектор и в панель авторизует человека целиком, поэтому кабинет у таких записей не указывается.</p>
+
+<h2>Подключение</h2>
+<p class="small">Адрес для Claude: <code>https://mcpwb.harbez.com/mcp</code></p>
+<p class="muted small">Вход сотрудников: invite. Черновиков с ошибкой: 0.</p>
+
+</div></body>
+</html>

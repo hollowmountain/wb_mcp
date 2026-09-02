@@ -123,7 +123,13 @@ async function ozonStatuses(): Promise<OzonStatus[]> {
 export function panelRouter(): Router {
     const router = Router();
 
-    router.get('/login', (_req, res) => {
+    router.get('/login', (req, res) => {
+        // Уже вошёл — форма не нужна. Так кэшированная ссылка на вход
+        // не выкидывает человека из панели, в которой он сидит.
+        if (readSession(req)) {
+            res.redirect('/panel');
+            return;
+        }
         beginPanelLogin(res);
     });
 
