@@ -40,6 +40,11 @@ const schema = z.object({
     REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(2592000),
     NEPSELL_TOKEN: z.string().default(''),
     NEPSELL_EMAILS: z.string().default(''),
+
+    ONEC_BASE_URL: z.string().default(''),
+    ONEC_USER: z.string().default(''),
+    ONEC_PASSWORD: z.string().default(''),
+    ONEC_EMAILS: z.string().default(''),
     LOG_LEVEL: z.string().default('info')
 });
 
@@ -160,6 +165,12 @@ export const config = {
     ozon: buildOzonCabinets(),
     /** Пустой токен — Nepsell выключен, инструменты не появляются ни у кого. */
     nepsell: { token: env.NEPSELL_TOKEN },
+    /** Пустой адрес — 1С выключена. */
+    onec: {
+        baseUrl: env.ONEC_BASE_URL.replace(/\/+$/, ''),
+        user: env.ONEC_USER,
+        password: env.ONEC_PASSWORD
+    },
 
     identityProvider: env.IDENTITY_PROVIDER,
     google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET },
@@ -170,6 +181,7 @@ export const config = {
         emails: allowedEmails,
         responders: csv(env.RESPONDER_EMAILS),
         nepsell: csv(env.NEPSELL_EMAILS),
+        onec: csv(env.ONEC_EMAILS),
         admins: adminEmails
     },
 
@@ -211,4 +223,16 @@ export function canUseNepsell(email: string): boolean {
     if (!config.nepsell.token) return false;
     const e = email.toLowerCase();
     return config.access.admins.includes(e) || config.access.nepsell.includes(e);
+}
+
+/**
+ * Кому открыта 1С. Список отдельный от Nepsell: это разные источники и
+ * разная чувствительность. В базе «Красота» зарплата не ведётся — все
+ * зарплатные объекты пустые, проверено, — но справочники сотрудников и
+ * физических лиц там есть, поэтому список держим коротким.
+ */
+export function canUseOnec(email: string): boolean {
+    if (!config.onec.baseUrl || !config.onec.user) return false;
+    const e = email.toLowerCase();
+    return config.access.admins.includes(e) || config.access.onec.includes(e);
 }

@@ -1,7 +1,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Actor } from '../auth/provider.js';
-import { canUseNepsell } from '../config.js';
+import { canUseNepsell, canUseOnec } from '../config.js';
 import { registerNepsellTools } from './tools/nepsell.js';
+import { registerOnecTools } from './tools/onec.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWriteTools } from './tools/write.js';
 
@@ -55,19 +56,33 @@ const NEPSELL_INSTRUCTIONS = `
 складывайте их: это разные измерения одного и того же. Всегда говорите человеку,
 откуда взята цифра.`;
 
+const ONEC_INSTRUCTIONS = `
+
+Вам доступна 1С:УНФ — учётная система предприятия, только на чтение.
+Коннектору открыты лишь номенклатура, контрагенты, организации, склады,
+заказы покупателей, накладные и остатки. Всё остальное, включая справочники
+сотрудников и физических лиц, для него не существует и запрашивать бесполезно.
+
+Не путайте 1С и маркетплейсы: это разный учёт одного бизнеса. Номенклатура в
+1С — учётная, карточки на Wildberries свои, и один товар может называться
+по-разному. Заказы в 1С — заказы предприятия, а не заказы маркетплейса.
+Всегда говорите человеку, из какой системы цифра.`;
+
 export function createMcpServer(actor: Actor): McpServer {
     const nepsell = canUseNepsell(actor.email);
+    const onec = canUseOnec(actor.email);
     const server = new McpServer(
         { name: 'mcp-wb', version: '0.1.0' },
         {
             capabilities: { tools: {} },
-            instructions: INSTRUCTIONS + (nepsell ? NEPSELL_INSTRUCTIONS : '')
+            instructions: INSTRUCTIONS + (nepsell ? NEPSELL_INSTRUCTIONS : '') + (onec ? ONEC_INSTRUCTIONS : '')
         }
     );
 
     registerReadTools(server);
     registerWriteTools(server);
     registerNepsellTools(server, actor);
+    registerOnecTools(server, actor);
 
     return server;
 }
