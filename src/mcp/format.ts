@@ -151,8 +151,10 @@ export function formatProductCard(card: ProductCard, good: Good | null): string 
 
     const sizes = card.sizes ?? [];
     if (sizes.length > 0) {
-        const names = sizes.map(s => s.techSize || s.wbSize).filter(Boolean);
-        lines.push(`   Размеры: ${names.length > 0 ? names.join(', ') : `${sizes.length} шт. без обозначений`}`);
+        // У товара без размерной сетки WB кладёт techSize «0» — это не размер,
+        // а его отсутствие, и показывать «Размеры: 0» только путает.
+        const names = sizes.map(s => s.techSize || s.wbSize).filter(n => n && n !== '0');
+        lines.push(`   Размеры: ${names.length > 0 ? names.join(', ') : 'без размерной сетки'}`);
         const barcodes = sizes.flatMap(s => s.skus ?? []);
         if (barcodes.length > 0) lines.push(`   Штрихкоды: ${barcodes.slice(0, 6).join(', ')}${barcodes.length > 6 ? ' …' : ''}`);
     }
@@ -181,7 +183,9 @@ export function formatReturnClaim(c: ReturnClaim, index?: number): string {
     const lines: string[] = [
         `${head}Заявка ${c.id} ${dash} ${ts(c.dt)}`,
         `   Товар: ${c.imt_name || dash} (nmID ${c.nm_id})`,
-        `   Сумма: ${rub(c.price, c.currency_code)} ${dash} заказ от ${ts(c.order_dt)}`,
+        // Здесь, в отличие от цен, сумма приходит в копейках: у заявки на крем
+        // было 889643, то есть 8 896,43. Поэтому price(), а не rub().
+        `   Сумма: ${price(c.price, c.currency_code)} ${dash} заказ от ${ts(c.order_dt)}`,
         // Числовые коды WB не расшифровывает в открытой документации, поэтому
         // показываем как есть: врать про смысл статуса хуже, чем показать цифру.
         `   Статус: код ${c.status} (расширенный ${c.status_ex}), тип заявки ${c.claim_type}`
