@@ -28,7 +28,10 @@ async function resolveLinks(actor: Actor, slug: string | undefined) {
     const links = linkCabinets(
         clients,
         config.cabinets.all().map(c => ({ slug: c.slug, orgId: c.info.orgId })),
-        config.ozon.map(c => ({ slug: c.slug, clientId: c.clientId }))
+        // Слаги Ozon начинаются с oz-, чтобы доступ к площадкам выдавался
+        // раздельно. Для Nepsell же кабинеты парятся по юрлицу, поэтому
+        // здесь префикс снимаем: oz-harbez и harbez — одна компания.
+        config.ozon.map(c => ({ slug: c.slug.replace(/^oz-/, ''), clientId: c.clientId }))
     ).filter(l => actor.cabinets === null || actor.cabinets.includes(l.slug));
 
     if (slug) {
