@@ -30,6 +30,9 @@ services:
             # Домен и почта для Let's Encrypt берутся из того же .env
             MCP_DOMAIN: ${MCP_DOMAIN}
             ACME_EMAIL: ${ACME_EMAIL}
+            # Хост, для которого Caddy отдаёт наружу путь ACME-валидации
+            # стороннего acme.sh (см. docker/Caddyfile). Не задан — заглушка.
+            VPN_ACME_HOST: ${VPN_ACME_HOST:-127.0.0.1}
         volumes:
             - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
             - caddy-data:/data
