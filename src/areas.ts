@@ -46,8 +46,10 @@ export const DEFAULT_AREAS: readonly Area[] = ['inbox', 'catalog', 'stock', 'ord
 export const PROFILES: Record<string, { label: string; areas: readonly Area[]; about: string }> = {
     support: {
         label: 'Поддержка покупателей',
-        areas: ['inbox', 'reply', 'catalog', 'stock'],
-        about: 'Отвечает на отзывы, вопросы и в чаты. Видит товар и наличие, чтобы ответить по делу.'
+        areas: ['inbox', 'reply', 'catalog', 'stock', 'orders'],
+        about:
+            'Отвечает на отзывы, вопросы и в чаты. Видит товар, наличие, заказы и возвраты своего ' +
+            'кабинета — без этого на половину обращений не ответить.'
     },
     manager: {
         label: 'Менеджер площадки',
