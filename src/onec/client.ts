@@ -291,19 +291,34 @@ export interface OnecStockRow {
 }
 
 /** Остатки на складах на текущий момент, только ненулевые. */
-export async function getOnecStock(
-    cfg: OnecConfig,
-    opts: { top?: number } = {}
-): Promise<OnecStockRow[]> {
+export async function getOnecStock(cfg: OnecConfig): Promise<OnecStockRow[]> {
     // Фильтровать по мере регистра нельзя: 1С отвечает «Операция не разрешена
     // в предложении ГДЕ». Поэтому забираем всё и отсеиваем нули у себя.
-    const raw = (
-        await listEntity<{
+    //
+    // Забираем именно постранично и с сортировкой. Одной страницы сегодня
+    // хватало — строк 846 при пределе в 1000, — но это случайность: вырастет
+    // склад, и остаток молча покажется неполным. А без сортировки страницы
+    // перекрываются, на чём здесь уже обжигались.
+    const PAGE_SIZE = 1000;
+    const pages: Array<{
+        Номенклатура_Key: string;
+        СтруктурнаяЕдиница_Key: string;
+        КоличествоBalance: number;
+    }> = [];
+    for (let skip = 0; skip < 40_000; skip += PAGE_SIZE) {
+        const rows = await listEntity<{
             Номенклатура_Key: string;
             СтруктурнаяЕдиница_Key: string;
             КоличествоBalance: number;
-        }>(cfg, 'AccumulationRegister_ЗапасыНаСкладах/Balance', { top: opts.top ?? 1000 })
-    ).filter(r => (r.КоличествоBalance ?? 0) > 0);
+        }>(cfg, 'AccumulationRegister_ЗапасыНаСкладах/Balance', {
+            top: PAGE_SIZE,
+            skip,
+            orderby: 'Номенклатура_Key'
+        });
+        pages.push(...rows);
+        if (rows.length < PAGE_SIZE) break;
+    }
+    const raw = pages.filter(r => (r.КоличествоBalance ?? 0) > 0);
 
     const [products, warehouses] = await Promise.all([
         resolveNames(cfg, 'Catalog_Номенклатура', raw.map(r => r.Номенклатура_Key)),

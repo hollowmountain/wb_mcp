@@ -405,7 +405,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             const denied = denyUnless(actorOf(extra), 'catalog');
             if (denied) return fail(denied);
 
-            const rows = await getOnecStock(config.onec, { top: 1000 });
+            const rows = await getOnecStock(config.onec);
             const byProduct = args.search?.trim().toLowerCase();
             const byPlace = args.warehouse?.trim().toLowerCase();
             const wanted = rows.filter(
