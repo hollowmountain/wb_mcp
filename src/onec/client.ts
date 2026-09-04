@@ -116,11 +116,18 @@ async function fetchEntity<T>(
     // разделителем сохраняем, каждую часть кодируем отдельно: иначе
     // encodeURIComponent превратит её в %2F и 1С ответит «сущность не найдена».
     const path = entity.split('/').map(encodeURIComponent).join('/');
-    const url = new URL(`${cfg.baseUrl}/odata/standard.odata/${path}`);
-    url.searchParams.set('$format', 'json');
+
+    // Строку запроса собираем руками. URLSearchParams кодирует пробел как «+»
+    // по правилам форм, а разборщик 1С понимает только %20 и берёт плюс
+    // буквально — фильтр «Date ge datetime'…' and DeletionMark eq false»
+    // превращался в бессмыслицу, и база отвечала «Операция не разрешена
+    // в предложении ГДЕ». Ломались все фильтры с пробелами, то есть все,
+    // кроме поиска по подстроке.
+    const parts = ['$format=json'];
     for (const [k, v] of Object.entries(query)) {
-        if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
+        if (v !== undefined && v !== '') parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
     }
+    const url = `${cfg.baseUrl}/odata/standard.odata/${path}?${parts.join('&')}`;
 
     const auth = Buffer.from(`${cfg.user}:${cfg.password}`).toString('base64');
     const res = await fetch(url, {
@@ -219,14 +226,15 @@ export async function getOnecStock(
     cfg: OnecConfig,
     opts: { top?: number } = {}
 ): Promise<OnecStockRow[]> {
-    const raw = await listEntity<{
-        Номенклатура_Key: string;
-        СтруктурнаяЕдиница_Key: string;
-        КоличествоBalance: number;
-    }>(cfg, 'AccumulationRegister_ЗапасыНаСкладах/Balance', {
-        top: opts.top ?? 1000,
-        filter: 'КоличествоBalance gt 0'
-    });
+    // Фильтровать по мере регистра нельзя: 1С отвечает «Операция не разрешена
+    // в предложении ГДЕ». Поэтому забираем всё и отсеиваем нули у себя.
+    const raw = (
+        await listEntity<{
+            Номенклатура_Key: string;
+            СтруктурнаяЕдиница_Key: string;
+            КоличествоBalance: number;
+        }>(cfg, 'AccumulationRegister_ЗапасыНаСкладах/Balance', { top: opts.top ?? 1000 })
+    ).filter(r => (r.КоличествоBalance ?? 0) > 0);
 
     const [products, warehouses] = await Promise.all([
         resolveNames(cfg, 'Catalog_Номенклатура', raw.map(r => r.Номенклатура_Key)),

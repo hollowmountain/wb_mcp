@@ -117,16 +117,16 @@ async function renderDocuments(opts: {
     const from = `${opts.dateFrom.slice(0, 10)}T00:00:00`;
     const to = `${opts.dateTo.slice(0, 10)}T23:59:59`;
 
-    // Состав документа приходит только вместе с самим документом целиком,
-    // поэтому $select ставим лишь тогда, когда состав не нужен: иначе 1С
-    // вернёт документ без табличных частей.
+    // $select здесь намеренно не задаётся. Состав документа лежит в самом
+    // документе, так что при withItems он и так нужен целиком. А без select
+    // не приходится знать заранее, какие поля у документа есть: у заказа
+    // на производство и у перемещения запасов нет СуммаДокумента, и запрос
+    // с ней падал с «Сегмент пути СуммаДокумента не найден». Документов
+    // берём немного, лишние байты дешевле лишней хрупкости.
     const rows = await listEntity<DocRow>(config.onec, opts.entity, {
         top: opts.limit,
         filter: `Date ge datetime'${from}' and Date le datetime'${to}' and DeletionMark eq false`,
-        orderby: 'Date desc',
-        select: opts.withItems
-            ? undefined
-            : `Ref_Key,Number,Date,Posted,СуммаДокумента${opts.partnerField ? `,${opts.partnerField}` : ''}`
+        orderby: 'Date desc'
     });
     if (rows.length === 0) return text(opts.empty);
 
