@@ -161,7 +161,11 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                     const total = (r.stocks ?? []).reduce((sum, x) => sum + (x.present ?? 0), 0);
                     return [
                         `${i + 1}. ${r.offer_id}`,
-                        `   Остаток: ${total} шт.${byType.length ? ` — ${byType.join(', ')}` : ''}`,
+                        // Здесь present — всё, что физически лежит на складе,
+                        // вместе с резервом. В ozon_stocks показывается
+                        // free_to_sell, то есть без резерва: числа законно
+                        // разные, и без подписи их принимают за расхождение.
+                        `   На складе с резервом: ${total} шт.${byType.length ? ` — ${byType.join(', ')}` : ''}`,
                         `   Цена: ${rub(p?.price, p?.currency_code)}${p?.old_price && p.old_price !== '0' ? ` (до скидки ${rub(p.old_price, p.currency_code)})` : ''}`
                     ].join('\n');
                 });
@@ -377,7 +381,8 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                 const totalFree = [...byProduct.values()].reduce((s, p) => s + p.free, 0);
 
                 return (
-                    `Товаров: ${byProduct.size}, свободно к продаже всего: ${totalFree.toLocaleString('ru-RU')} шт\n\n` +
+                    `Товаров: ${byProduct.size}, свободно к продаже всего: ${totalFree.toLocaleString('ru-RU')} шт ` +
+                    `(без резерва; в ozon_products тот же остаток показан вместе с резервом)\n\n` +
                     list
                         .map(([code, p]) => {
                             const head = `${p.name.slice(0, 60)} (${code})`;
