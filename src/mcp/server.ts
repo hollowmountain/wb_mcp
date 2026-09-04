@@ -77,7 +77,7 @@ const ONEC_INSTRUCTIONS = `
 
 export function createMcpServer(actor: Actor): McpServer {
     const nepsell = inArea(actor, 'money');
-    const onec = inArea(actor, 'catalog') || inArea(actor, 'orders');
+    const onec = inArea(actor, 'erp');
     const server = new McpServer(
         { name: 'mcp-wb', version: '0.1.0' },
         {

@@ -24,11 +24,11 @@ const day = (v: unknown): string => (typeof v === 'string' && v.length >= 10 ? v
  */
 const onecReady = (): boolean => Boolean(config.onec.baseUrl && config.onec.user);
 
-const anyOnec = (actor: Actor): boolean => onecReady() && (inArea(actor, 'catalog') || inArea(actor, 'orders'));
+const anyOnec = (actor: Actor): boolean => onecReady() && inArea(actor, 'erp');
 
-function denyUnless(actor: Actor, area: 'catalog' | 'orders'): string | null {
-    if (onecReady() && inArea(actor, area)) return null;
-    return `Эта часть 1С вам не открыта: нужна область «${area}». Обратитесь к администратору.`;
+function denyUnless(actor: Actor, _area: 'catalog' | 'orders'): string | null {
+    if (anyOnec(actor)) return null;
+    return 'Учётная система 1С вам не открыта: нужна область «erp». Обратитесь к администратору.';
 }
 
 interface Product {

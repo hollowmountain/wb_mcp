@@ -9,7 +9,7 @@
  * Список намеренно короткий. Каждая область должна отвечать чьей-то настоящей
  * работе, иначе она превращается в галочку, которую ставят не думая.
  */
-export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'money'] as const;
+export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'erp', 'money'] as const;
 
 export type Area = (typeof AREAS)[number];
 
@@ -18,7 +18,8 @@ export const AREA_LABELS: Record<Area, string> = {
     reply: 'право отвечать покупателям',
     catalog: 'товары и цены',
     stock: 'остатки на складах',
-    orders: 'заказы, возвраты, контрагенты',
+    orders: 'заказы и возвраты на площадках',
+    erp: 'учётная система 1С',
     money: 'себестоимость, прибыль, реклама'
 };
 
@@ -28,6 +29,7 @@ export const AREA_LABELS: Record<Area, string> = {
  */
 export const AREA_NOTES: Partial<Record<Area, string>> = {
     reply: 'Без inbox бессмысленна: отвечать не на что.',
+    erp: 'Отдельно от orders: у 1С нет разреза по кабинетам, там данные всей компании сразу.',
     money: 'Самая чувствительная. Не выдаётся по умолчанию — только явно.'
 };
 
@@ -54,12 +56,12 @@ export const PROFILES: Record<string, { label: string; areas: readonly Area[]; a
     },
     operations: {
         label: 'Закупки и склад',
-        areas: ['catalog', 'stock', 'orders'],
-        about: 'Снабжение и производство. Переписки с покупателями не видит.'
+        areas: ['catalog', 'stock', 'orders', 'erp'],
+        about: 'Снабжение и производство, вместе с учётом в 1С. Переписки с покупателями не видит.'
     },
     finance: {
         label: 'Финансы',
-        areas: ['money', 'orders', 'catalog'],
+        areas: ['money', 'orders', 'erp', 'catalog'],
         about: 'Себестоимость, прибыль, окупаемость рекламы. Переписки с покупателями не видит.'
     },
     owner: {

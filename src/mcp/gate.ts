@@ -21,7 +21,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     wb_whoami: null,
     ozon_cabinets: null,
     nep_cabinets: null,
-    onec_reference: null,
+
 
     // обращения покупателей
     wb_overview: 'inbox',
@@ -51,7 +51,6 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     // товары и цены
     wb_product: 'catalog',
     ozon_products: 'catalog',
-    onec_products: 'catalog',
 
     // остатки
     wb_stocks: 'stock',
@@ -61,8 +60,13 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     wb_returns: 'orders',
     ozon_orders: 'orders',
     ozon_returns: 'orders',
-    onec_orders: 'orders',
-    onec_partners: 'orders',
+
+    // 1С отдельно от orders: у неё нет разреза по кабинетам, и человек,
+    // ограниченный одним кабинетом маркетплейса, увидел бы там всю компанию.
+    onec_reference: 'erp',
+    onec_products: 'erp',
+    onec_orders: 'erp',
+    onec_partners: 'erp',
 
     // экономика
     wb_regions: 'money',
