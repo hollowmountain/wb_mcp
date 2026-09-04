@@ -95,6 +95,21 @@ interface DocItem {
     СуммаНДС?: number;
 }
 
+/**
+ * Строка сдельного наряда. Поля называются иначе, чем в товарных документах:
+ * не Количество и Сумма, а КоличествоФакт, Расценка и Стоимость. Вид работ
+ * лежит в Операция_Key и ссылается на номенклатуру.
+ */
+interface PieceworkOp {
+    Операция_Key?: string;
+    Номенклатура_Key?: string;
+    КоличествоПлан?: number;
+    КоличествоФакт?: number;
+    Расценка?: number;
+    Стоимость?: number;
+    Нормочасы?: number;
+}
+
 const itemsOf = (doc: DocRow): DocItem[] => {
     for (const section of ITEM_SECTIONS) {
         const v = doc[section];
@@ -214,6 +229,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 'onec_warehouse   Движения склада: перемещения, списания, оприходования,',
                 '                 инвентаризации за период.',
                 'onec_stock_value Запасы в деньгах: учётная себестоимость по складам.',
+                'onec_specification Из чего сделана продукция: состав материалов и операции.',
                 'onec_receipts    Приходные накладные с ценами: что и почём поступило.',
                 'onec_piecework   Сдельные наряды: кто из работников что сделал и на сколько.',
                 'onec_reference   Эта справка.',
@@ -569,11 +585,12 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 : rows;
             if (wanted.length === 0) return text(`Нарядов по запросу «${args.executor}» нет.`);
 
+            const opsOf = (r: DocRow): PieceworkOp[] => (Array.isArray(r.Операции) ? (r.Операции as PieceworkOp[]) : []);
             const products = args.withOperations
                 ? await resolveNames(
                       config.onec,
                       'Catalog_Номенклатура',
-                      wanted.flatMap(r => (Array.isArray(r.Операции) ? (r.Операции as DocItem[]) : []).map(o => String(o.Номенклатура_Key ?? '')))
+                      wanted.flatMap(r => opsOf(r).flatMap(o => [String(o.Операция_Key ?? ''), String(o.Номенклатура_Key ?? '')]))
                   )
                 : new Map<string, string>();
 
@@ -599,7 +616,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     (r.Posted === false ? ' (не проведён)' : '') +
                     (r.Закрыт === false ? ' (не закрыт)' : '');
                 if (!args.withOperations) return head;
-                const ops = Array.isArray(r.Операции) ? (r.Операции as DocItem[]) : [];
+                const ops = opsOf(r);
                 if (ops.length === 0) return `${head}\n   операций нет`;
                 return (
                     head +
@@ -607,9 +624,14 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     ops
                         .slice(0, 20)
                         .map(o => {
-                            const name = products.get(String(o.Номенклатура_Key ?? '')) || '(без названия)';
-                            const qty = typeof o.Количество === 'number' ? o.Количество.toLocaleString('ru-RU') : dash;
-                            return `   ${name} ${dash} ${qty}${o.Сумма ? ` на ${money(o.Сумма)}` : ''}`;
+                            const what =
+                                products.get(String(o.Операция_Key ?? '')) ||
+                                products.get(String(o.Номенклатура_Key ?? '')) ||
+                                '(вид работ не указан)';
+                            const qty = typeof o.КоличествоФакт === 'number' ? o.КоличествоФакт.toLocaleString('ru-RU') : dash;
+                            const rate = typeof o.Расценка === 'number' ? ` × ${money(o.Расценка)}` : '';
+                            const cost = typeof o.Стоимость === 'number' ? ` = ${money(o.Стоимость)}` : '';
+                            return `   ${what} ${dash} ${qty}${rate}${cost}`;
                         })
                         .join('\n')
                 );
@@ -785,6 +807,82 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             return text(
                 [...head, '', `── ${where}, самые дорогие ──`, '', ...body].join('\n')
             );
+        })
+    );
+
+    server.registerTool(
+        'onec_specification',
+        {
+            title: '1С: спецификации продукции',
+            description:
+                'Из чего сделана готовая продукция: состав материалов с количествами и операции с нормами времени. ' +
+                'Нужна, чтобы посчитать материальную себестоимость изделия.',
+            inputSchema: {
+                search: z.string().optional().describe('Часть названия спецификации или продукции'),
+                withOperations: z.boolean().optional().describe('Показать ещё и операции с нормами времени'),
+                limit: z.number().int().min(1).max(50).optional().describe('Сколько спецификаций показать, по умолчанию 10')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_specification', async (args, extra) => {
+            const denied = denyUnless(actorOf(extra), 'catalog');
+            if (denied) return fail(denied);
+
+            const needle = args.search?.trim().toLowerCase();
+            const specs = await listEntity<{
+                Ref_Key: string;
+                Description?: string;
+                Owner_Key?: string;
+                Недействителен?: boolean;
+                Состав?: Array<{
+                    ТипСтрокиСостава?: string;
+                    Номенклатура_Key?: string;
+                    Количество?: number;
+                    КоличествоПродукции?: number;
+                }>;
+            }>(config.onec, 'Catalog_Спецификации', {
+                top: needle ? 200 : (args.limit ?? 10),
+                filter: 'DeletionMark eq false',
+                orderby: 'Description'
+            });
+
+            const wanted = (needle ? specs.filter(s => (s.Description ?? '').toLowerCase().includes(needle)) : specs).slice(
+                0,
+                args.limit ?? 10
+            );
+            if (wanted.length === 0) {
+                return text(needle ? `Спецификаций по запросу «${args.search}» нет.` : 'Спецификаций нет.');
+            }
+
+            const names = await resolveNames(
+                config.onec,
+                'Catalog_Номенклатура',
+                wanted.flatMap(s => [
+                    String(s.Owner_Key ?? ''),
+                    ...(s.Состав ?? []).map(i => String(i.Номенклатура_Key ?? ''))
+                ])
+            );
+
+            const blocks = wanted.map(s => {
+                const product = names.get(String(s.Owner_Key ?? '')) || '';
+                const head =
+                    `${s.Description || '(без названия)'}` +
+                    (product ? `\n   продукция: ${product}` : '') +
+                    (s.Недействителен ? '   (недействительна)' : '');
+                const rows = (s.Состав ?? []).slice(0, 30).map(i => {
+                    const what = names.get(String(i.Номенклатура_Key ?? '')) || '(без названия)';
+                    const qty = typeof i.Количество === 'number' ? i.Количество.toLocaleString('ru-RU') : dash;
+                    const per = typeof i.КоличествоПродукции === 'number' && i.КоличествоПродукции !== 1
+                        ? ` на ${i.КоличествоПродукции.toLocaleString('ru-RU')} ед. продукции`
+                        : '';
+                    const kind = i.ТипСтрокиСостава && i.ТипСтрокиСостава !== 'Материал' ? ` [${i.ТипСтрокиСостава}]` : '';
+                    return `   ${what}${kind} ${dash} ${qty}${per}`;
+                });
+                const more = (s.Состав ?? []).length > 30 ? `\n   и ещё ${(s.Состав ?? []).length - 30} строк` : '';
+                return rows.length > 0 ? `${head}\n${rows.join('\n')}${more}` : `${head}\n   состав пуст`;
+            });
+
+            return text(`Спецификаций: ${wanted.length}\n\n${blocks.join('\n\n')}`);
         })
     );
 }
