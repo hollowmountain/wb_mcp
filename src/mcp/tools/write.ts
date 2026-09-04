@@ -1,8 +1,9 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
+import type { Actor } from '../../auth/provider.js';
 import { audit } from '../../audit.js';
-import { canUseCabinet, allowedCabinets, resolveCabinet } from '../../access.js';
+import { canUseCabinet, allowedCabinets, hasAnyCabinet, resolveCabinet } from '../../access.js';
 import { describeAreas } from '../../areas.js';
 import {
     assertCanSend,
@@ -32,7 +33,10 @@ const cabinetArg = z
         'Идентификатор кабинета Wildberries. Если не указан, кабинет определяется по идентификатору обращения. Список кабинетов — в wb_cabinets.'
     );
 
-export function registerWriteTools(server: McpServer): void {
+export function registerWriteTools(server: McpServer, actor: Actor): void {
+    // У человека только Ozon — инструменты Wildberries ему показывать незачем.
+    if (!hasAnyCabinet(actor)) return;
+
     // ─── Создание черновиков ────────────────────────────────────────────────
 
     server.registerTool(

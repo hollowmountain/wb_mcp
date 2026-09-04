@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import { allowedCabinets, resolveCabinets } from '../../access.js';
+import { allowedCabinets, hasAnyCabinet, resolveCabinets } from '../../access.js';
 import type { Actor } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { kvGet, kvSet } from '../../db/index.js';
@@ -118,7 +118,10 @@ async function overCabinets(
     return text(blocks.join('\n\n'));
 }
 
-export function registerReadTools(server: McpServer): void {
+export function registerReadTools(server: McpServer, actor: Actor): void {
+    // У человека только Ozon — инструменты Wildberries ему показывать незачем.
+    if (!hasAnyCabinet(actor)) return;
+
     server.registerTool(
         'wb_cabinets',
         {

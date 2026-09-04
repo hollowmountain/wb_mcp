@@ -90,8 +90,8 @@ export function createMcpServer(actor: Actor): McpServer {
     // не попадут в список, а вызов по устаревшему списку получит отказ.
     gateByAreas(server, actor);
 
-    registerReadTools(server);
-    registerWriteTools(server);
+    registerReadTools(server, actor);
+    registerWriteTools(server, actor);
     registerNepsellTools(server, actor);
     registerOnecTools(server, actor);
     registerOzonTools(server, actor);

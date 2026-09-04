@@ -58,3 +58,16 @@ export function resolveCabinets(actor: Actor, slug?: string): Cabinet[] {
 export function canUseCabinet(actor: Actor, slug: string): boolean {
     return actor.cabinets === null || actor.cabinets.includes(slug);
 }
+
+/**
+ * Есть ли у человека хоть один кабинет Wildberries.
+ *
+ * Нужна, чтобы не показывать инструменты WB тому, у кого только Ozon: иначе
+ * он видит два десятка кнопок, каждая из которых отвечает «кабинет вам не
+ * открыт». Симметрично тому, как устроен доступ к Ozon.
+ */
+export function hasAnyCabinet(actor: Actor): boolean {
+    if (actor.cabinets === null) return config.cabinets.size > 0;
+    const scope = new Set(actor.cabinets);
+    return config.cabinets.all().some(c => scope.has(c.slug));
+}
