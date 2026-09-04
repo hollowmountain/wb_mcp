@@ -336,7 +336,7 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
         },
         guarded('ozon_stocks', async (args, extra) =>
             overCabinets(actorOf(extra), args.cabinet, async cabinet => {
-                const rows = await getOzonWarehouseStocks(cabinet, { limit: 1000 });
+                const rows = await getOzonWarehouseStocks(cabinet);
                 const needle = args.search?.trim().toLowerCase();
                 const wanted = needle
                     ? rows.filter(r => r.offerId.toLowerCase().includes(needle) || r.name.toLowerCase().includes(needle))
@@ -366,7 +366,16 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                         .map(([code, p]) => {
                             const head = `${p.name.slice(0, 60)} (${code})`;
                             const nums = `   свободно ${p.free} · резерв ${p.reserved} · едет ${p.promised}`;
-                            const where = p.places.length > 0 ? `\n   склады: ${p.places.slice(0, 6).join(', ')}` : '';
+                            // Складов бывает два десятка; показываем шесть крупнейших,
+                            // но обязательно говорим, сколько осталось за кадром —
+                            // иначе перечисленные числа не сходятся с итогом по товару.
+                            const top = [...p.places].sort((x, y) => Number(y.split(': ')[1]) - Number(x.split(': ')[1]));
+                            const hidden = top.length - 6;
+                            const where =
+                                top.length > 0
+                                    ? `\n   склады: ${top.slice(0, 6).join(', ')}` +
+                                      (hidden > 0 ? ` и ещё ${hidden}` : '')
+                                    : '';
                             return `${head}\n${nums}${where}`;
                         })
                         .join('\n')

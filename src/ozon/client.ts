@@ -319,18 +319,25 @@ interface RawStockRow {
  * такая же на вид выгрузка содержала строку «Всего на складах», и наивная
  * сумма задваивала остаток вдвое.
  */
-export async function getOzonWarehouseStocks(
-    cabinet: OzonCabinet,
-    params: { limit?: number; offset?: number } = {}
-): Promise<OzonWarehouseStock[]> {
-    const raw = await retryOn429(() =>
-        post<{ result?: { rows?: RawStockRow[] } }>(cabinet, '/v2/analytics/stock_on_warehouses', {
-            limit: Math.min(params.limit ?? 500, 1000),
-            offset: params.offset ?? 0,
-            warehouse_type: 'ALL'
-        })
-    );
-    return (raw.result?.rows ?? []).map(r => ({
+export async function getOzonWarehouseStocks(cabinet: OzonCabinet): Promise<OzonWarehouseStock[]> {
+    // Одна страница вмещает 1000 строк, а строка — это пара «товар × склад».
+    // У кабинета с сотней товаров и двумя десятками складов страниц будет
+    // несколько, и остановка на первой молча покажет неполный остаток.
+    const PAGE = 1000;
+    const all: RawStockRow[] = [];
+    for (let offset = 0; offset < 20_000; offset += PAGE) {
+        const raw = await retryOn429(() =>
+            post<{ result?: { rows?: RawStockRow[] } }>(cabinet, '/v2/analytics/stock_on_warehouses', {
+                limit: PAGE,
+                offset,
+                warehouse_type: 'ALL'
+            })
+        );
+        const rows = raw.result?.rows ?? [];
+        all.push(...rows);
+        if (rows.length < PAGE) break;
+    }
+    return all.map(r => ({
         sku: r.sku ?? 0,
         warehouseName: r.warehouse_name ?? '',
         offerId: r.item_code ?? '',
