@@ -33,6 +33,40 @@ const cabinetArg = z
         'Идентификатор кабинета Wildberries. Если не указан, кабинет определяется по идентификатору обращения. Список кабинетов — в wb_cabinets.'
     );
 
+/**
+ * Рассказывает человеку, что ему открыто. Регистрируется всегда, даже если
+ * кабинетов Wildberries нет: это сведения о самом человеке, а не о площадке,
+ * и без них он не поймёт, почему видит мало инструментов.
+ */
+export function registerWhoAmI(server: McpServer): void {
+    server.registerTool(
+        'wb_whoami',
+        {
+            title: 'Кто я и что мне разрешено',
+            description:
+                'Показывает, под какой учётной записью работает коннектор, может ли она отправлять ответы покупателям и какие кабинеты доступны.',
+            inputSchema: {},
+            annotations: { readOnlyHint: true }
+        },
+        guarded('wb_whoami', async (_args, extra) => {
+            const actor = actorOf(extra);
+            const cabinets = allowedCabinets(actor)
+                .map(c => `  ${c.slug} — ${c.label}${c.info.readOnly ? ' (токен только на чтение)' : ''}`)
+                .join('\n');
+            return text(
+                [
+                    `Пользователь: ${actor.email}`,
+                    `Роль: ${actor.role}`,
+                    `Ваши области: ${describeAreas(actor.areas)}`,
+                    `Разрешения токена доступа: ${actor.scopes.join(', ') || 'нет'}`,
+                    'Кабинеты Wildberries:',
+                    cabinets
+                ].join('\n')
+            );
+        })
+    );
+}
+
 export function registerWriteTools(server: McpServer, actor: Actor): void {
     // У человека только Ozon — инструменты Wildberries ему показывать незачем.
     if (!hasAnyCabinet(actor)) return;
@@ -302,30 +336,4 @@ export function registerWriteTools(server: McpServer, actor: Actor): void {
         })
     );
 
-    server.registerTool(
-        'wb_whoami',
-        {
-            title: 'Кто я и что мне разрешено',
-            description:
-                'Показывает, под какой учётной записью работает коннектор, может ли она отправлять ответы покупателям и какие кабинеты доступны.',
-            inputSchema: {},
-            annotations: { readOnlyHint: true }
-        },
-        guarded('wb_whoami', async (_args, extra) => {
-            const actor = actorOf(extra);
-            const cabinets = allowedCabinets(actor)
-                .map(c => `  ${c.slug} — ${c.label}${c.info.readOnly ? ' (токен только на чтение)' : ''}`)
-                .join('\n');
-            return text(
-                [
-                    `Пользователь: ${actor.email}`,
-                    `Роль: ${actor.role}`,
-                    `Ваши области: ${describeAreas(actor.areas)}`,
-                    `Разрешения токена доступа: ${actor.scopes.join(', ') || 'нет'}`,
-                    'Кабинеты Wildberries:',
-                    cabinets
-                ].join('\n')
-            );
-        })
-    );
 }

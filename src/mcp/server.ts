@@ -6,7 +6,7 @@ import { registerNepsellTools } from './tools/nepsell.js';
 import { registerOnecTools } from './tools/onec.js';
 import { registerOzonTools } from './tools/ozon.js';
 import { registerReadTools } from './tools/read.js';
-import { registerWriteTools } from './tools/write.js';
+import { registerWhoAmI, registerWriteTools } from './tools/write.js';
 
 const INSTRUCTIONS = `Этот сервер даёт доступ к общению с покупателями в личном кабинете Wildberries: отзывы, вопросы и чаты, а также к справочным данным по товарам и возвратам.
 
@@ -90,6 +90,7 @@ export function createMcpServer(actor: Actor): McpServer {
     // не попадут в список, а вызов по устаревшему списку получит отказ.
     gateByAreas(server, actor);
 
+    registerWhoAmI(server);
     registerReadTools(server, actor);
     registerWriteTools(server, actor);
     registerNepsellTools(server, actor);
