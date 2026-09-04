@@ -155,8 +155,15 @@ export function panelRouter(): Router {
             // Список сотрудников — сведения о всей организации. Их видит только
             // администратор; ограниченный сотрудник видит одну свою строку.
             const isAdmin = session.role === 'admin';
+            // Видеть работу коллег и иметь право отправлять покупателям — разные
+            // вещи, а раньше их давала одна роль администратора. Теперь это
+            // отдельная область: её можно выдать, не открывая отправку.
+            const areasRow = db.prepare('SELECT areas FROM users WHERE email = ?').get(session.email) as
+                | { areas: string | null }
+                | undefined;
+            const seesEveryone = isAdmin || areasOf(session.email, areasRow?.areas).includes('people');
             const users = (
-                isAdmin
+                seesEveryone
                     ? db.prepare('SELECT email, name, last_seen FROM users ORDER BY last_seen DESC LIMIT 50').all()
                     : db.prepare('SELECT email, name, last_seen FROM users WHERE email = ?').all(session.email)
             ) as Array<{ email: string; name: string | null; last_seen: number }>;
@@ -180,7 +187,7 @@ export function panelRouter(): Router {
             // и события своих кабинетов. Чужая активность не показывается.
             const allowed = session.cabinets;
             const audit = (
-                isAdmin || allowed === null
+                seesEveryone || allowed === null
                     ? db
                           .prepare('SELECT ts, cabinet, actor, action, target, outcome FROM audit ORDER BY ts DESC LIMIT 40')
                           .all()
@@ -228,9 +235,9 @@ export function panelRouter(): Router {
                     session,
                     cabinets,
                     users: users.map(u => ({ ...u, role: roleLabel(u.email), scope: scopeOf(u.email), areas: areasOfUser(u.email) })),
-                    isAdmin,
+                    isAdmin: seesEveryone,
                     // Как и журнал: администратору по всем, остальным — только своё.
-                    usage: toolUsage(7, isAdmin ? undefined : session.email),
+                    usage: toolUsage(7, seesEveryone ? undefined : session.email),
                     audit,
                     drafts: { pending: byStatus('pending'), sent: byStatus('sent'), failed: byStatus('failed') },
                     draftsByCabinet: perCabinet
