@@ -4,7 +4,14 @@ import { z } from 'zod';
 import type { Actor } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { inArea } from '../../auth/provider.js';
-import { ALLOWED_ENTITIES, countEntity, listEntity, type OnecEntity } from '../../onec/client.js';
+import {
+    ALLOWED_ENTITIES,
+    countEntity,
+    getOnecStock,
+    listEntity,
+    resolveNames,
+    type OnecEntity
+} from '../../onec/client.js';
 import { actorOf, fail, guarded, text } from './common.js';
 
 const dash = '—';
@@ -59,6 +66,111 @@ interface SalesOrder {
     Контрагент_Key: string;
 }
 
+
+/**
+ * Табличные части в 1С OData лежат внутри самого документа отдельными
+ * массивами: у заказа покупателя это «Запасы», у прочих обычно «Товары» или
+ * «Запасы». Отдельными сущностями вида Document_X_Товары они НЕ публикуются —
+ * такой запрос вернёт «сущность не найдена».
+ */
+const ITEM_SECTIONS = ['Запасы', 'Товары', 'Материалы', 'Продукция'] as const;
+
+interface DocRow {
+    Ref_Key: string;
+    Number?: string;
+    Date?: string;
+    Posted?: boolean;
+    СуммаДокумента?: number;
+    Контрагент_Key?: string;
+    [key: string]: unknown;
+}
+
+interface DocItem {
+    Номенклатура?: string;
+    Номенклатура_Key?: string;
+    Количество?: number;
+    Цена?: number;
+    Сумма?: number;
+}
+
+const itemsOf = (doc: DocRow): DocItem[] => {
+    for (const section of ITEM_SECTIONS) {
+        const v = doc[section];
+        if (Array.isArray(v) && v.length > 0) return v as DocItem[];
+    }
+    return [];
+};
+
+/**
+ * Единая отрисовка журнала документов: они устроены одинаково, отличаются
+ * только именем сущности и тем, есть ли у них контрагент.
+ */
+async function renderDocuments(opts: {
+    entity: OnecEntity;
+    dateFrom: string;
+    dateTo: string;
+    limit: number;
+    withItems: boolean;
+    partnerField?: string;
+    empty: string;
+}) {
+    const from = `${opts.dateFrom.slice(0, 10)}T00:00:00`;
+    const to = `${opts.dateTo.slice(0, 10)}T23:59:59`;
+
+    // Состав документа приходит только вместе с самим документом целиком,
+    // поэтому $select ставим лишь тогда, когда состав не нужен: иначе 1С
+    // вернёт документ без табличных частей.
+    const rows = await listEntity<DocRow>(config.onec, opts.entity, {
+        top: opts.limit,
+        filter: `Date ge datetime'${from}' and Date le datetime'${to}' and DeletionMark eq false`,
+        orderby: 'Date desc',
+        select: opts.withItems
+            ? undefined
+            : `Ref_Key,Number,Date,Posted,СуммаДокумента${opts.partnerField ? `,${opts.partnerField}` : ''}`
+    });
+    if (rows.length === 0) return text(opts.empty);
+
+    const partners = opts.partnerField
+        ? await resolveNames(
+              config.onec,
+              'Catalog_Контрагенты',
+              rows.map(r => String(r[opts.partnerField as string] ?? ''))
+          )
+        : new Map<string, string>();
+
+    const productKeys = opts.withItems
+        ? rows.flatMap(r => itemsOf(r).map(i => String(i.Номенклатура ?? i.Номенклатура_Key ?? '')))
+        : [];
+    const products = productKeys.length > 0
+        ? await resolveNames(config.onec, 'Catalog_Номенклатура', productKeys)
+        : new Map<string, string>();
+
+    const total = rows.reduce((s, r) => s + (r.СуммаДокумента ?? 0), 0);
+    const blocks = rows.map((r, i) => {
+        const who = opts.partnerField ? partners.get(String(r[opts.partnerField as string] ?? '')) : undefined;
+        const head =
+            `${i + 1}. № ${r.Number || dash} от ${day(r.Date)}` +
+            (who ? ` ${dash} ${who}` : '') +
+            (r.СуммаДокумента ? ` ${dash} ${money(r.СуммаДокумента)}` : '') +
+            (r.Posted === false ? ' (не проведён)' : '');
+        if (!opts.withItems) return head;
+        const items = itemsOf(r);
+        if (items.length === 0) return `${head}\n   состав пуст`;
+        const lines = items.slice(0, 20).map(it => {
+            const key = String(it.Номенклатура ?? it.Номенклатура_Key ?? '');
+            const name = products.get(key) || '(без названия)';
+            const qty = typeof it.Количество === 'number' ? it.Количество.toLocaleString('ru-RU') : dash;
+            return `   ${name} ${dash} ${qty}${it.Сумма ? ` на ${money(it.Сумма)}` : ''}`;
+        });
+        const more = items.length > 20 ? `\n   и ещё ${items.length - 20} строк` : '';
+        return `${head}\n${lines.join('\n')}${more}`;
+    });
+
+    return text(
+        `Документов: ${rows.length}${total > 0 ? `, на сумму ${money(total)}` : ''}\n\n${blocks.join('\n')}`
+    );
+}
+
 export function registerOnecTools(server: McpServer, actor: Actor): void {
     if (!anyOnec(actor)) return;
 
@@ -67,23 +179,72 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
         {
             title: '1С: что доступно',
             description:
-                'Какие разделы 1С открыты коннектору и сколько в них записей. Вызовите первым, чтобы понять, с чем вообще можно работать.',
-            inputSchema: {},
+                'С чего начать работу с 1С: какие инструменты есть, какие данные они дают и чего в базе нет. ' +
+                'Вызовите первым, если не знаете, что можно спросить.',
+            inputSchema: {
+                counts: z
+                    .boolean()
+                    .optional()
+                    .describe('Посчитать записи в каждом разделе. Медленно, по умолчанию нет.')
+            },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('onec_reference', async (_args, extra) => {
+        guarded('onec_reference', async (args, extra) => {
             const denied = anyOnec(actorOf(extra)) ? null : 'Доступ к 1С вам не открыт.';
             if (denied) return fail(denied);
 
-            const lines = ['Коннектору открыты только эти разделы 1С, остальное для него не существует:', ''];
+            const lines = [
+                'РАБОТА С 1С ЧЕРЕЗ КОННЕКТОР',
+                '',
+                'База: 1С:Управление нашей фирмой. Коннектор ходит в неё ТОЛЬКО НА ЧТЕНИЕ —',
+                'создать, изменить или провести документ через него невозможно.',
+                '',
+                '── ИНСТРУМЕНТЫ ──',
+                '',
+                'onec_stock       Остатки на складах: сколько чего лежит и где.',
+                '                 Это учётный остаток предприятия, не остаток маркетплейса.',
+                'onec_products    Номенклатура: поиск товара по названию, артикулу или коду.',
+                'onec_partners    Контрагенты: поставщики и покупатели, поиск по названию или ИНН.',
+                'onec_orders      Заказы покупателей за период: номер, дата, сумма, проведён ли.',
+                'onec_purchases   Заказы поставщикам: что заказано, у кого, на какую сумму,',
+                '                 с составом заказа по строкам.',
+                'onec_production  Заказы на производство: что и сколько запущено в работу.',
+                'onec_warehouse   Движения склада: перемещения, списания, оприходования,',
+                '                 инвентаризации за период.',
+                'onec_reference   Эта справка.',
+                '',
+                '── ЧЕГО В БАЗЕ НЕТ ──',
+                '',
+                'Зарплаты и кадровых данных нет: соответствующие документы пусты.',
+                'Отзывов, вопросов и переписки с покупателями в 1С нет — это площадки,',
+                'смотрите инструменты wb_* и ozon_*.',
+                'Себестоимости в разрезе товара маркетплейса тут тоже нет — она в nep_economy.',
+                '',
+                '── ЧЕГО НЕТ У КОННЕКТОРА ──',
+                '',
+                'В базе опубликовано больше полутора тысяч сущностей, включая справочники',
+                'физических лиц и сотрудников. Коннектору из них открыт короткий список,',
+                'всё остальное для него не существует и вернёт отказ:',
+                ''
+            ];
+
             for (const entity of ALLOWED_ENTITIES) {
-                try {
-                    lines.push(`   ${entity} ${dash} записей: ${await countEntity(config.onec, entity)}`);
-                } catch (e) {
-                    lines.push(`   ${entity} ${dash} недоступен: ${e instanceof Error ? e.message : String(e)}`);
+                if (args.counts) {
+                    try {
+                        lines.push(`   ${entity} ${dash} записей: ${await countEntity(config.onec, entity)}`);
+                    } catch (e) {
+                        lines.push(`   ${entity} ${dash} недоступен: ${e instanceof Error ? e.message : String(e)}`);
+                    }
+                } else {
+                    lines.push(`   ${entity}`);
                 }
             }
-            lines.push('', 'Только чтение: изменить что-либо в 1С через коннектор нельзя.');
+
+            lines.push(
+                '',
+                'Если для работы нужен раздел, которого здесь нет, — скажите администратору,',
+                'какой именно и зачем. Список расширяется, но осознанно.'
+            );
             return text(lines.join('\n'));
         })
     );
@@ -199,6 +360,156 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     `${i + 1}. № ${r.Number || dash} от ${day(r.Date)} ${dash} ${money(r.СуммаДокумента)}${r.Posted ? '' : ' (не проведён)'}`
             );
             return text(`Заказов: ${rows.length}, на сумму ${money(total)}\n\n${lines.join('\n')}`);
+        })
+    );
+
+    server.registerTool(
+        'onec_stock',
+        {
+            title: '1С: остатки на складах',
+            description:
+                'Учётные остатки предприятия: сколько чего лежит и на каком складе. ' +
+                'Это остаток по данным 1С, а не остаток на складах маркетплейса — для тех есть wb_stocks и ozon_stocks.',
+            inputSchema: {
+                search: z.string().optional().describe('Часть названия товара'),
+                warehouse: z.string().optional().describe('Часть названия склада'),
+                limit: z.number().int().min(1).max(200).optional().describe('Сколько товаров показать, по умолчанию 30')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_stock', async (args, extra) => {
+            const denied = denyUnless(actorOf(extra), 'catalog');
+            if (denied) return fail(denied);
+
+            const rows = await getOnecStock(config.onec, { top: 1000 });
+            const byProduct = args.search?.trim().toLowerCase();
+            const byPlace = args.warehouse?.trim().toLowerCase();
+            const wanted = rows.filter(
+                r =>
+                    (!byProduct || r.product.toLowerCase().includes(byProduct)) &&
+                    (!byPlace || r.warehouse.toLowerCase().includes(byPlace))
+            );
+            if (wanted.length === 0) return text('Ненулевых остатков по такому запросу нет.');
+
+            // Строка регистра — это остаток товара на одном складе; сводных
+            // строк здесь нет, поэтому складывать можно прямо.
+            const grouped = new Map<string, { total: number; places: Array<{ name: string; qty: number }> }>();
+            for (const r of wanted) {
+                const acc = grouped.get(r.product) ?? { total: 0, places: [] };
+                acc.total += r.quantity;
+                acc.places.push({ name: r.warehouse, qty: r.quantity });
+                grouped.set(r.product, acc);
+            }
+            const list = [...grouped.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, args.limit ?? 30);
+            const total = [...grouped.values()].reduce((s, g) => s + g.total, 0);
+
+            const lines = list.map(([name, g]) => {
+                const places = g.places
+                    .sort((a, b) => b.qty - a.qty)
+                    .slice(0, 5)
+                    .map(pl => `${pl.name}: ${pl.qty.toLocaleString('ru-RU')}`);
+                const hidden = g.places.length - 5;
+                return (
+                    `${name}\n   всего ${g.total.toLocaleString('ru-RU')}` +
+                    `\n   ${places.join(', ')}${hidden > 0 ? ` и ещё ${hidden}` : ''}`
+                );
+            });
+            return text(
+                `Позиций с остатком: ${grouped.size}, всего единиц: ${total.toLocaleString('ru-RU')}\n\n${lines.join('\n')}`
+            );
+        })
+    );
+
+    server.registerTool(
+        'onec_purchases',
+        {
+            title: '1С: заказы поставщикам',
+            description:
+                'Что заказано у поставщиков за период: номер, дата, поставщик, сумма и состав заказа по строкам.',
+            inputSchema: {
+                dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
+                dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
+                withItems: z.boolean().optional().describe('Показать состав заказов. По умолчанию нет.'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько показать, по умолчанию 20')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_purchases', async (args, extra) => {
+            const denied = denyUnless(actorOf(extra), 'orders');
+            if (denied) return fail(denied);
+            return renderDocuments({
+                entity: 'Document_ЗаказПоставщику',
+                dateFrom: args.dateFrom,
+                dateTo: args.dateTo,
+                limit: args.limit ?? 20,
+                withItems: args.withItems === true,
+                partnerField: 'Контрагент_Key',
+                empty: 'Заказов поставщикам за этот период нет.'
+            });
+        })
+    );
+
+    server.registerTool(
+        'onec_production',
+        {
+            title: '1С: заказы на производство',
+            description: 'Что и сколько запущено в производство за период: номер, дата, состояние, состав заказа.',
+            inputSchema: {
+                dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
+                dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
+                withItems: z.boolean().optional().describe('Показать состав заказов. По умолчанию нет.'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько показать, по умолчанию 20')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_production', async (args, extra) => {
+            const denied = denyUnless(actorOf(extra), 'orders');
+            if (denied) return fail(denied);
+            return renderDocuments({
+                entity: 'Document_ЗаказНаПроизводство',
+                dateFrom: args.dateFrom,
+                dateTo: args.dateTo,
+                limit: args.limit ?? 20,
+                withItems: args.withItems === true,
+                empty: 'Заказов на производство за этот период нет.'
+            });
+        })
+    );
+
+    server.registerTool(
+        'onec_warehouse',
+        {
+            title: '1С: движения склада',
+            description:
+                'Складские операции за период: перемещения между складами, списания, оприходования, инвентаризации.',
+            inputSchema: {
+                kind: z
+                    .enum(['перемещения', 'списания', 'оприходования', 'инвентаризации'])
+                    .describe('Какие документы показать'),
+                dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
+                dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
+                withItems: z.boolean().optional().describe('Показать состав документов. По умолчанию нет.'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько показать, по умолчанию 20')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_warehouse', async (args, extra) => {
+            const denied = denyUnless(actorOf(extra), 'orders');
+            if (denied) return fail(denied);
+            const map = {
+                перемещения: 'Document_ПеремещениеЗапасов',
+                списания: 'Document_СписаниеЗапасов',
+                оприходования: 'Document_ОприходованиеЗапасов',
+                инвентаризации: 'Document_ИнвентаризацияЗапасов'
+            } as const;
+            return renderDocuments({
+                entity: map[args.kind],
+                dateFrom: args.dateFrom,
+                dateTo: args.dateTo,
+                limit: args.limit ?? 20,
+                withItems: args.withItems === true,
+                empty: `Документов «${args.kind}» за этот период нет.`
+            });
         })
     );
 }

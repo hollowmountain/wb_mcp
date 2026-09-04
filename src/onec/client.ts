@@ -27,16 +27,31 @@ import { TokenBucket } from '../wb/ratelimit.js';
  * Ничего про сотрудников, физических лиц, зарплату и НДФЛ здесь быть не должно.
  */
 export const ALLOWED_ENTITIES = [
+    // Справочники
     'Catalog_Номенклатура',
     'Catalog_ЕдиницыИзмерения',
     'Catalog_Организации',
     'Catalog_Контрагенты',
     'Catalog_СтруктурныеЕдиницы',
+    'Catalog_ХарактеристикиНоменклатуры',
+    // Документы продаж и закупок
     'Document_ЗаказПокупателя',
     'Document_РасходнаяНакладная',
     'Document_ПриходнаяНакладная',
+    'Document_ЗаказПоставщику',
+    // Производство и склад
+    'Document_ЗаказНаПроизводство',
+    'Document_ПеремещениеЗапасов',
+    'Document_СписаниеЗапасов',
+    'Document_ОприходованиеЗапасов',
+    'Document_ИнвентаризацияЗапасов',
+    // Регистры
     'AccumulationRegister_ЗапасыНаСкладах',
-    'AccumulationRegister_Продажи'
+    // Виртуальная таблица остатков: сами движения бесполезны без свёртки,
+    // а Balance отдаёт готовый остаток на текущий момент.
+    'AccumulationRegister_ЗапасыНаСкладах/Balance',
+    'AccumulationRegister_Продажи',
+    'AccumulationRegister_Продажи/Turnovers'
 ] as const;
 
 export type OnecEntity = (typeof ALLOWED_ENTITIES)[number];
@@ -97,7 +112,11 @@ async function fetchEntity<T>(
 
     await bucket.take(1);
 
-    const url = new URL(`${cfg.baseUrl}/odata/standard.odata/${encodeURIComponent(entity)}`);
+    // Имя может состоять из двух частей — «регистр/Balance». Косую черту
+    // разделителем сохраняем, каждую часть кодируем отдельно: иначе
+    // encodeURIComponent превратит её в %2F и 1С ответит «сущность не найдена».
+    const path = entity.split('/').map(encodeURIComponent).join('/');
+    const url = new URL(`${cfg.baseUrl}/odata/standard.odata/${path}`);
     url.searchParams.set('$format', 'json');
     for (const [k, v] of Object.entries(query)) {
         if (v !== undefined && v !== '') url.searchParams.set(k, String(v));
@@ -129,13 +148,14 @@ async function fetchEntity<T>(
 export async function listEntity<T>(
     cfg: OnecConfig,
     entity: OnecEntity,
-    opts: { top?: number; filter?: string; select?: string; orderby?: string } = {}
+    opts: { top?: number; filter?: string; select?: string; orderby?: string; expand?: string } = {}
 ): Promise<T[]> {
     const res = await fetchEntity<{ value: T[] }>(cfg, entity, {
         $top: Math.min(opts.top ?? 50, 1000),
         $filter: opts.filter,
         $select: opts.select,
-        $orderby: opts.orderby
+        $orderby: opts.orderby,
+        $expand: opts.expand
     });
     return res?.value ?? [];
 }
@@ -150,3 +170,74 @@ export async function countEntity(cfg: OnecConfig, entity: OnecEntity): Promise<
 
 /** Что вообще открыто коннектору — для показа человеку. */
 export const describeAllowed = (): string => ALLOWED_ENTITIES.join(', ');
+
+
+// ─── Разворачивание ссылок ───────────────────────────────────────────────────
+
+const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * Регистры хранят ссылки на справочники, а не названия: в строке остатка
+ * лежит Номенклатура_Key вида 542544e4-… . Показывать человеку такое нельзя,
+ * поэтому собираем уникальные ссылки и спрашиваем названия одним запросом
+ * на справочник. $expand тоже работает, но тянет карточку целиком — на сотне
+ * строк это мегабайты ради одного поля.
+ */
+export async function resolveNames(
+    cfg: OnecConfig,
+    entity: OnecEntity,
+    keys: Iterable<string>
+): Promise<Map<string, string>> {
+    const unique = [...new Set([...keys].filter(k => k && k !== EMPTY_GUID))];
+    const names = new Map<string, string>();
+    if (unique.length === 0) return names;
+
+    // Длина строки запроса не бесконечна: рвём на куски по полсотни ссылок.
+    for (let i = 0; i < unique.length; i += 50) {
+        const chunk = unique.slice(i, i + 50);
+        const filter = chunk.map(k => `Ref_Key eq guid'${k}'`).join(' or ');
+        const rows = await listEntity<{ Ref_Key: string; Description?: string; Наименование?: string }>(
+            cfg,
+            entity,
+            { top: chunk.length, filter, select: 'Ref_Key,Description' }
+        );
+        for (const r of rows) names.set(r.Ref_Key, r.Description ?? r.Наименование ?? '');
+    }
+    return names;
+}
+
+export interface OnecStockRow {
+    productKey: string;
+    product: string;
+    warehouseKey: string;
+    warehouse: string;
+    quantity: number;
+}
+
+/** Остатки на складах на текущий момент, только ненулевые. */
+export async function getOnecStock(
+    cfg: OnecConfig,
+    opts: { top?: number } = {}
+): Promise<OnecStockRow[]> {
+    const raw = await listEntity<{
+        Номенклатура_Key: string;
+        СтруктурнаяЕдиница_Key: string;
+        КоличествоBalance: number;
+    }>(cfg, 'AccumulationRegister_ЗапасыНаСкладах/Balance', {
+        top: opts.top ?? 1000,
+        filter: 'КоличествоBalance gt 0'
+    });
+
+    const [products, warehouses] = await Promise.all([
+        resolveNames(cfg, 'Catalog_Номенклатура', raw.map(r => r.Номенклатура_Key)),
+        resolveNames(cfg, 'Catalog_СтруктурныеЕдиницы', raw.map(r => r.СтруктурнаяЕдиница_Key))
+    ]);
+
+    return raw.map(r => ({
+        productKey: r.Номенклатура_Key,
+        product: products.get(r.Номенклатура_Key) ?? '(без названия)',
+        warehouseKey: r.СтруктурнаяЕдиница_Key,
+        warehouse: warehouses.get(r.СтруктурнаяЕдиница_Key) ?? '(склад не указан)',
+        quantity: r.КоличествоBalance
+    }));
+}
