@@ -310,9 +310,17 @@ export function formatRegionSales(
     const quantity = totals.reduce((s, t) => s + t.quantity, 0);
     const shown = totals.slice(0, limit);
 
+    // Отчёт region-sale отдаёт поле saleInvoiceCostPrice, и это НЕ та выручка,
+    // что в отчётах по продажам: на нашем месяце штуки сходятся с Непселем
+    // (7978 против 8027), а суммы расходятся почти вдвое — 3,2 млн против 5,7.
+    // Пока не выяснено, что именно WB считает этим полем, число подписывается
+    // его собственным именем, чтобы его не приняли за выручку.
     const lines = [
         `Продажи по ${REGION_LEVEL_TITLE[level]} за ${period.from} — ${period.to}`,
         `Всего: ${rub(amount, 'RUB')}, ${quantity} шт., точек ${totals.length}`,
+        'Суммы — поле saleInvoiceCostPrice отчёта Wildberries «продажи по регионам».',
+        'Оно не совпадает с выручкой из других отчётов; для выручки и прибыли',
+        'берите nep_economy. Штуки и доли регионов здесь достоверны.',
         ''
     ];
     for (const [i, t] of shown.entries()) {
