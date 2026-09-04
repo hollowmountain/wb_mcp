@@ -212,3 +212,175 @@ export interface OzonChat {
 
 export const listOzonChats = (cabinet: OzonCabinet, limit = 30): Promise<{ chats: OzonChat[] }> =>
     post(cabinet, '/v3/chat/list', { limit: Math.min(limit, 1000), filter: { unread_only: false } });
+
+// ─── Аналитика, остатки по складам и финансы ─────────────────────────────────
+//
+// Всё проверено на живых кабинетах 04.09.2026. Три замечания, которые стоили
+// времени и которые легко забыть:
+//
+// 1. Ozon выбросил почти все показатели воронки: delivered_units, returns,
+//    cancellations, hits_view*, hits_tocart*, session_view*, conv_tocart*,
+//    position_category, postings, adv_* отвечают «deprecated metrics used».
+//    Остались ровно два: revenue и ordered_units. Просить больше нельзя —
+//    один устаревший показатель роняет весь запрос в 400.
+// 2. Если попросить смесь живых и мёртвых показателей, Ozon не ругается,
+//    а молча возвращает только живые. Порядок значений в metrics совпадает
+//    с порядком запроса, поэтому разъезд легко не заметить.
+// 3. Аналитика ограничена по частоте жёстче остального API: третий запрос
+//    подряд с паузой в секунду уже ловит 429. Отсюда retryOn429 ниже.
+
+/** Живые показатели аналитики. Больше просить нельзя — запрос упадёт целиком. */
+export const OZON_METRICS = ['revenue', 'ordered_units'] as const;
+
+async function retryOn429<T>(run: () => Promise<T>, tries = 3): Promise<T> {
+    let wait = 2000;
+    for (let i = 0; ; i++) {
+        try {
+            return await run();
+        } catch (e) {
+            const limited = e instanceof OzonApiError && (e.status === 429 || e.status === 503);
+            if (!limited || i >= tries - 1) throw e;
+            await new Promise(r => setTimeout(r, wait));
+            wait *= 2;
+        }
+    }
+}
+
+export interface OzonAnalyticsRow {
+    /** Для разреза по товару — SKU и название; по дню — дата. */
+    id: string;
+    name: string;
+    revenue: number;
+    orderedUnits: number;
+}
+
+export interface OzonAnalytics {
+    rows: OzonAnalyticsRow[];
+    totalRevenue: number;
+    totalUnits: number;
+}
+
+interface RawAnalytics {
+    result?: {
+        data?: Array<{ dimensions?: Array<{ id?: string; name?: string }>; metrics?: number[] }>;
+        totals?: number[];
+    };
+}
+
+export async function getOzonAnalytics(
+    cabinet: OzonCabinet,
+    params: { dateFrom: string; dateTo: string; dimension: 'sku' | 'day'; limit?: number }
+): Promise<OzonAnalytics> {
+    const raw = await retryOn429(() =>
+        post<RawAnalytics>(cabinet, '/v1/analytics/data', {
+            date_from: params.dateFrom,
+            date_to: params.dateTo,
+            metrics: [...OZON_METRICS],
+            dimension: [params.dimension],
+            limit: Math.min(params.limit ?? 20, 1000),
+            offset: 0
+        })
+    );
+    const rows = (raw.result?.data ?? []).map(r => ({
+        id: r.dimensions?.[0]?.id ?? '',
+        name: r.dimensions?.[0]?.name ?? '',
+        revenue: r.metrics?.[0] ?? 0,
+        orderedUnits: r.metrics?.[1] ?? 0
+    }));
+    const totals = raw.result?.totals ?? [];
+    return { rows, totalRevenue: totals[0] ?? 0, totalUnits: totals[1] ?? 0 };
+}
+
+export interface OzonWarehouseStock {
+    sku: number;
+    warehouseName: string;
+    offerId: string;
+    name: string;
+    /** Свободно к продаже. */
+    free: number;
+    reserved: number;
+    /** Ожидается поставкой. */
+    promised: number;
+}
+
+interface RawStockRow {
+    sku?: number;
+    warehouse_name?: string;
+    item_code?: string;
+    item_name?: string;
+    free_to_sell_amount?: number;
+    reserved_amount?: number;
+    promised_amount?: number;
+}
+
+/**
+ * Остатки в разрезе складов. Каждая строка — пара «товар × склад», сводных
+ * строк здесь нет, поэтому складывать их можно без опаски: на Wildberries
+ * такая же на вид выгрузка содержала строку «Всего на складах», и наивная
+ * сумма задваивала остаток вдвое.
+ */
+export async function getOzonWarehouseStocks(
+    cabinet: OzonCabinet,
+    params: { limit?: number; offset?: number } = {}
+): Promise<OzonWarehouseStock[]> {
+    const raw = await retryOn429(() =>
+        post<{ result?: { rows?: RawStockRow[] } }>(cabinet, '/v2/analytics/stock_on_warehouses', {
+            limit: Math.min(params.limit ?? 500, 1000),
+            offset: params.offset ?? 0,
+            warehouse_type: 'ALL'
+        })
+    );
+    return (raw.result?.rows ?? []).map(r => ({
+        sku: r.sku ?? 0,
+        warehouseName: r.warehouse_name ?? '',
+        offerId: r.item_code ?? '',
+        name: r.item_name ?? '',
+        free: r.free_to_sell_amount ?? 0,
+        reserved: r.reserved_amount ?? 0,
+        promised: r.promised_amount ?? 0
+    }));
+}
+
+/**
+ * Итоги расчётов за период. Значения — рубли с копейками (не копейки!):
+ * проверено сверкой с оборотом кабинета. Расходы приходят отрицательными,
+ * поэтому «к перечислению» — это просто сумма всех полей.
+ */
+export interface OzonFinanceTotals {
+    accrualsForSale: number;
+    saleCommission: number;
+    processingAndDelivery: number;
+    refundsAndCancellations: number;
+    servicesAmount: number;
+    compensationAmount: number;
+    moneyTransfer: number;
+    othersAmount: number;
+    /** Сумма всех полей: сколько остаётся продавцу. */
+    net: number;
+}
+
+export async function getOzonFinanceTotals(
+    cabinet: OzonCabinet,
+    params: { from: string; to: string }
+): Promise<OzonFinanceTotals> {
+    const raw = await retryOn429(() =>
+        post<{ result?: Record<string, number> }>(cabinet, '/v3/finance/transaction/totals', {
+            date: { from: `${params.from}T00:00:00.000Z`, to: `${params.to}T23:59:59.999Z` },
+            transaction_type: 'all'
+        })
+    );
+    const r = raw.result ?? {};
+    const num = (k: string): number => r[k] ?? 0;
+    const totals = {
+        accrualsForSale: num('accruals_for_sale'),
+        saleCommission: num('sale_commission'),
+        processingAndDelivery: num('processing_and_delivery'),
+        refundsAndCancellations: num('refunds_and_cancellations'),
+        servicesAmount: num('services_amount'),
+        compensationAmount: num('compensation_amount'),
+        moneyTransfer: num('money_transfer'),
+        othersAmount: num('others_amount')
+    };
+    const net = Object.values(totals).reduce((a, b) => a + b, 0);
+    return { ...totals, net };
+}

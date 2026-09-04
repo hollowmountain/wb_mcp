@@ -51,6 +51,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     // товары и цены
     wb_product: 'catalog',
     ozon_products: 'catalog',
+    ozon_stocks: 'stock',
 
     // остатки
     wb_stocks: 'stock',
@@ -60,6 +61,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     wb_returns: 'orders',
     ozon_orders: 'orders',
     ozon_returns: 'orders',
+    ozon_analytics: 'orders',
 
     // 1С отдельно от orders: у неё нет разреза по кабинетам, и человек,
     // ограниченный одним кабинетом маркетплейса, увидел бы там всю компанию.
@@ -75,6 +77,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
 
     // экономика
     nep_economy: 'money',
+    ozon_finance: 'money',
     nep_ads: 'money'
 };
 

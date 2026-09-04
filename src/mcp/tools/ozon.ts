@@ -4,8 +4,11 @@ import { z } from 'zod';
 import type { Actor } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import {
+    getOzonAnalytics,
+    getOzonFinanceTotals,
     getOzonPrices,
     getOzonStocks,
+    getOzonWarehouseStocks,
     listFboPostings,
     listFbsPostings,
     listOzonChats,
@@ -72,6 +75,34 @@ const rub = (v: string | undefined, cur?: string): string =>
     v === undefined || v === '' ? dash : `${Number(v).toLocaleString('ru-RU')} ${cur ?? '₽'}`.trim();
 
 const day = (v: string | undefined): string => (v ? v.slice(0, 10) : dash);
+
+const money = (n: number): string =>
+    `${n.toLocaleString('ru-RU', { maximumFractionDigits: 0 })} \u20bd`;
+
+const dateArg = (what: string) =>
+    z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Дата в виде 2026-09-01').describe(what);
+
+/**
+ * Как overCabinets, но кабинеты опрашиваются по очереди. Нужно там, где Ozon
+ * особенно скуп на частоту: у аналитики третий запрос подряд уже ловит 429,
+ * а три кабинета разом — это ровно три запроса.
+ */
+async function overCabinetsInTurn(
+    actor: Actor,
+    slug: string | undefined,
+    run: (cabinet: OzonCabinet) => Promise<string>
+): Promise<ToolResult> {
+    const cabinets = resolve(actor, slug);
+    const blocks: string[] = [];
+    for (const c of cabinets) {
+        try {
+            blocks.push(heading(c, cabinets.length) + (await run(c)));
+        } catch (e) {
+            blocks.push(`${heading(c, cabinets.length)}Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+        }
+    }
+    return text(blocks.join('\n\n'));
+}
 
 export function registerOzonTools(server: McpServer, actor: Actor): void {
     if (allowedOzon(actor).length === 0) return;
@@ -246,6 +277,136 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                     })
                     .join('\n');
                 return `Чатов: ${chats.length}, с непрочитанными: ${unread.length}\n\n${lines}`;
+            })
+        )
+    );
+
+    server.registerTool(
+        'ozon_analytics',
+        {
+            title: 'Ozon: продажи по товарам и дням',
+            description:
+                'Выручка и заказанные штуки за период — по товарам или по дням. ' +
+                'Других показателей у Ozon больше нет: воронку (показы, корзины, конверсию) площадка убрала из API.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                dateFrom: dateArg('Начало периода: 2026-08-01'),
+                dateTo: dateArg('Конец периода: 2026-09-01'),
+                groupBy: z.enum(['товар', 'день']).optional().describe('Разрез. По умолчанию по товарам.'),
+                limit: z.number().int().min(1).max(200).optional().describe('Сколько строк, по умолчанию 20')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('ozon_analytics', async (args, extra) => {
+            const byDay = args.groupBy === 'день';
+            return overCabinetsInTurn(actorOf(extra), args.cabinet, async cabinet => {
+                const a = await getOzonAnalytics(cabinet, {
+                    dateFrom: args.dateFrom,
+                    dateTo: args.dateTo,
+                    dimension: byDay ? 'day' : 'sku',
+                    limit: args.limit ?? 20
+                });
+                if (a.rows.length === 0) return 'За этот период данных нет.';
+                const lines = a.rows.map(r => {
+                    const label = byDay ? r.name || r.id : `${r.name.slice(0, 60)} (SKU ${r.id})`;
+                    return `${label}\n   ${money(r.revenue)} · ${r.orderedUnits.toLocaleString('ru-RU')} шт`;
+                });
+                return (
+                    `${args.dateFrom} — ${args.dateTo}\n` +
+                    `Итого: ${money(a.totalRevenue)} · ${a.totalUnits.toLocaleString('ru-RU')} шт\n\n` +
+                    lines.join('\n')
+                );
+            });
+        })
+    );
+
+    server.registerTool(
+        'ozon_stocks',
+        {
+            title: 'Ozon: остатки по складам',
+            description:
+                'Сколько товара лежит на каждом складе Ozon: свободно к продаже, в резерве, ожидается поставкой. ' +
+                'Можно сузить поиском по артикулу или названию.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                search: z.string().optional().describe('Часть артикула продавца или названия'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько товаров показать, по умолчанию 20')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('ozon_stocks', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
+                const rows = await getOzonWarehouseStocks(cabinet, { limit: 1000 });
+                const needle = args.search?.trim().toLowerCase();
+                const wanted = needle
+                    ? rows.filter(r => r.offerId.toLowerCase().includes(needle) || r.name.toLowerCase().includes(needle))
+                    : rows;
+                if (wanted.length === 0) return needle ? `По запросу «${args.search}» ничего нет.` : 'Остатков нет.';
+
+                // Строки приходят парами «товар × склад»; сводных строк здесь нет,
+                // поэтому суммирование по товару честное.
+                const byProduct = new Map<string, { name: string; free: number; reserved: number; promised: number; places: string[] }>();
+                for (const r of wanted) {
+                    const key = r.offerId || String(r.sku);
+                    const acc = byProduct.get(key) ?? { name: r.name, free: 0, reserved: 0, promised: 0, places: [] };
+                    acc.free += r.free;
+                    acc.reserved += r.reserved;
+                    acc.promised += r.promised;
+                    if (r.free > 0 || r.reserved > 0) acc.places.push(`${r.warehouseName}: ${r.free}`);
+                    byProduct.set(key, acc);
+                }
+                const list = [...byProduct.entries()]
+                    .sort((a, b) => b[1].free - a[1].free)
+                    .slice(0, args.limit ?? 20);
+                const totalFree = [...byProduct.values()].reduce((s, p) => s + p.free, 0);
+
+                return (
+                    `Товаров: ${byProduct.size}, свободно к продаже всего: ${totalFree.toLocaleString('ru-RU')} шт\n\n` +
+                    list
+                        .map(([code, p]) => {
+                            const head = `${p.name.slice(0, 60)} (${code})`;
+                            const nums = `   свободно ${p.free} · резерв ${p.reserved} · едет ${p.promised}`;
+                            const where = p.places.length > 0 ? `\n   склады: ${p.places.slice(0, 6).join(', ')}` : '';
+                            return `${head}\n${nums}${where}`;
+                        })
+                        .join('\n')
+                );
+            })
+        )
+    );
+
+    server.registerTool(
+        'ozon_finance',
+        {
+            title: 'Ozon: расчёты с площадкой',
+            description:
+                'Что Ozon начислил и что удержал за период: продажи, комиссия, логистика и обработка, ' +
+                'возвраты, услуги, компенсации. Внизу — сколько остаётся продавцу.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                dateFrom: dateArg('Начало периода: 2026-08-01'),
+                dateTo: dateArg('Конец периода: 2026-09-01')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('ozon_finance', async (args, extra) =>
+            overCabinetsInTurn(actorOf(extra), args.cabinet, async cabinet => {
+                const f = await getOzonFinanceTotals(cabinet, { from: args.dateFrom, to: args.dateTo });
+                const share = f.accrualsForSale > 0 ? Math.round((f.net / f.accrualsForSale) * 100) : 0;
+                const line = (label: string, v: number): string => `${label.padEnd(26, '.')} ${money(v)}`;
+                return [
+                    `${args.dateFrom} — ${args.dateTo}`,
+                    '',
+                    line('Начислено за продажи', f.accrualsForSale),
+                    line('Комиссия площадки', f.saleCommission),
+                    line('Обработка и доставка', f.processingAndDelivery),
+                    line('Возвраты и отмены', f.refundsAndCancellations),
+                    line('Услуги', f.servicesAmount),
+                    line('Компенсации', f.compensationAmount),
+                    line('Прочее', f.othersAmount),
+                    '',
+                    `К перечислению: ${money(f.net)} — это ${share}% от начисленного`
+                ].join('\n');
             })
         )
     );
