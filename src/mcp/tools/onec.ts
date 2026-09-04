@@ -629,7 +629,10 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                                 products.get(String(o.Номенклатура_Key ?? '')) ||
                                 '(вид работ не указан)';
                             const qty = typeof o.КоличествоФакт === 'number' ? o.КоличествоФакт.toLocaleString('ru-RU') : dash;
-                            const rate = typeof o.Расценка === 'number' ? ` × ${money(o.Расценка)}` : '';
+                            // Расценку показываем, только если она заполнена: у части
+                            // нарядов сумма проставлена напрямую, и «× 0 ₽» читалось бы
+                            // как ошибка расчёта, а не как незаполненное поле.
+                            const rate = typeof o.Расценка === 'number' && o.Расценка !== 0 ? ` × ${money(o.Расценка)}` : '';
                             const cost = typeof o.Стоимость === 'number' ? ` = ${money(o.Стоимость)}` : '';
                             return `   ${what} ${dash} ${qty}${rate}${cost}`;
                         })
