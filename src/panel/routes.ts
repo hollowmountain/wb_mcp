@@ -1,5 +1,6 @@
 import { Router } from 'express';
 
+import { toolUsage } from '../audit.js';
 import { areasOf, config } from '../config.js';
 import { db, kvGet, kvSet } from '../db/index.js';
 import { logger } from '../logger.js';
@@ -228,6 +229,8 @@ export function panelRouter(): Router {
                     cabinets,
                     users: users.map(u => ({ ...u, role: roleLabel(u.email), scope: scopeOf(u.email), areas: areasOfUser(u.email) })),
                     isAdmin,
+                    // Как и журнал: администратору по всем, остальным — только своё.
+                    usage: toolUsage(7, isAdmin ? undefined : session.email),
                     audit,
                     drafts: { pending: byStatus('pending'), sent: byStatus('sent'), failed: byStatus('failed') },
                     draftsByCabinet: perCabinet

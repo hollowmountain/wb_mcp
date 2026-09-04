@@ -1,4 +1,5 @@
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import { audit, type AuditOutcome } from '../../audit.js';
 import { actorFromAuthInfo, type Actor } from '../../auth/provider.js';
 import { DraftError } from '../../drafts.js';
 import { logger } from '../../logger.js';
@@ -25,14 +26,53 @@ export function actorOf(extra: CallExtra): Actor {
 }
 
 /**
+ * Записываем сам факт вызова: кто, что дёрнул, по какому кабинету, чем
+ * кончилось и сколько заняло.
+ *
+ * Ни параметров запроса, ни ответа здесь нет и быть не должно. Иначе в журнал
+ * попадут поисковые строки и тексты переписки с покупателями, и он из средства
+ * понять, чем пользуются, превратится в слежку за тем, что человек читал.
+ * Кабинет — единственное исключение: без него не отличить работу по «красоте»
+ * от работы по «харбезу», а сам по себе он ничего личного не сообщает.
+ */
+function record(name: string, args: unknown, extra: CallExtra, outcome: AuditOutcome, startedAt: number): void {
+    try {
+        const email = typeof extra.authInfo?.extra?.email === 'string' ? extra.authInfo.extra.email : 'аноним';
+        const cabinet =
+            args && typeof args === 'object' && typeof (args as { cabinet?: unknown }).cabinet === 'string'
+                ? (args as { cabinet: string }).cabinet
+                : undefined;
+        audit({
+            actor: email,
+            action: `tool.${name}`,
+            cabinet,
+            outcome,
+            detail: { ms: Date.now() - startedAt }
+        });
+    } catch (e) {
+        // Журнал не должен ломать работу инструмента: если запись не удалась,
+        // человек всё равно должен получить свои данные.
+        logger.warn({ tool: name, err: e }, 'не удалось записать вызов в журнал');
+    }
+}
+
+/**
  * Оборачивает обработчик инструмента: превращает исключения в понятный текст,
  * чтобы модель могла объяснить пользователю, что пошло не так, а не упасть.
+ * Заодно отмечает вызов в журнале.
  */
 export function guarded<A>(name: string, handler: (args: A, extra: CallExtra) => Promise<ToolResult>) {
     return async (args: A, extra: CallExtra): Promise<ToolResult> => {
+        const startedAt = Date.now();
         try {
-            return await handler(args, extra);
+            const result = await handler(args, extra);
+            // Отказ по правам приходит обычным результатом с пометкой isError —
+            // отличаем его от успеха, иначе в журнале не увидеть, кому чего
+            // не хватает для работы.
+            record(name, args, extra, result.isError === true ? 'denied' : 'ok', startedAt);
+            return result;
         } catch (e) {
+            record(name, args, extra, 'error', startedAt);
             if (e instanceof WbApiError) {
                 logger.warn({ tool: name, status: e.status, path: e.path }, 'wb error in tool');
                 return fail(e.toUserMessage());

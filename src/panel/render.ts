@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import type { Cabinet } from '../wb/cabinets.js';
 import { CATEGORY_NAMES, daysLeft, type TokenInfo } from '../wb/token.js';
 import type { SellerInfo } from '../wb/api.js';
+import type { ToolUsageRow } from '../audit.js';
 import type { PanelSession } from './session.js';
 
 export interface CabinetStatus {
@@ -36,6 +37,8 @@ export interface PanelData {
     drafts: { pending: number; sent: number; failed: number };
     draftsByCabinet: Array<{ cabinet: string; pending: number }>;
     ozon: OzonStatus[];
+    /** Чем пользовались за неделю: администратору по всем, остальным — своё. */
+    usage?: ToolUsageRow[];
     /** Администратор видит организацию целиком, остальные — только своё. */
     isAdmin: boolean;
     generatedAt: number;
@@ -163,7 +166,13 @@ const CABINET_AGNOSTIC = new Set(['oauth.login', 'oauth.token.issued', 'panel.lo
 
 function actionCell(action: string): string {
     const label = ACTION_LABELS[action];
-    return label ? escapeHtml(label) : `<code>${escapeHtml(action)}</code>`;
+    if (label) return escapeHtml(label);
+    // Вызовы инструментов приходят как tool.wb_feedbacks_list. Показываем имя
+    // инструмента, а слово «чтение» отделяет их от действий, меняющих данные.
+    if (action.startsWith('tool.')) {
+        return `<span class="muted">чтение</span> <code>${escapeHtml(action.slice(5))}</code>`;
+    }
+    return `<code>${escapeHtml(action)}</code>`;
 }
 
 function cabinetCell(action: string, cabinet: string | null): string {
@@ -263,6 +272,14 @@ function ozonCard(o: OzonStatus): string {
 }
 
 export function renderPanel(data: PanelData): string {
+    const usageRows = (data.usage ?? [])
+        .slice(0, 40)
+        .map(
+            u => `<tr><td>${escapeHtml(u.actor)}</td><td><code>${escapeHtml(u.tool)}</code></td>` +
+                 `<td>${u.calls}</td><td>${u.denied || ''}</td><td>${u.errors || ''}</td>` +
+                 `<td class="muted">${u.avgMs} мс</td></tr>`
+        )
+        .join('');
     const totals = data.cabinets.reduce(
         (acc, c) => {
             if (!c.counts) return acc;
@@ -446,6 +463,13 @@ ${queue}
   <tbody>${userRows || '<tr><td colspan="4" class="muted">Пока никто не подключался</td></tr>'}</tbody>
 </table></div>
 <p class="muted small">Доступ складывается из двух осей: <b>кабинеты</b> — где, <b>области</b> — что. Отвечать покупателям может только тот, у кого есть область <code>reply</code>.${data.isAdmin ? '' : ' Показан только ваш доступ.'}</p>
+
+<h2>Чем пользовались за неделю</h2>
+<div class="scroll"><table>
+  <thead><tr><th>Кто</th><th>Инструмент</th><th>Вызовов</th><th>Отказов</th><th>Ошибок</th><th>Среднее время</th></tr></thead>
+  <tbody>${usageRows || '<tr><td colspan="6" class="muted">Пока никто ничего не вызывал. Записывать вызовы начали недавно — данные появятся по мере работы.</td></tr>'}</tbody>
+</table></div>
+<p class="muted small">Записывается только имя инструмента, кабинет, исход и длительность. Ни запросов, ни ответов, ни текстов переписки здесь нет. «Отказ» — когда человеку не хватило прав: по этой колонке видно, кому чего недостаёт для работы. Записи хранятся 90 дней.</p>
 
 <h2>${data.isAdmin ? 'Последние действия' : 'Ваши последние действия'}</h2>
 <div class="scroll"><table>

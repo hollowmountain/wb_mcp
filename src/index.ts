@@ -10,6 +10,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { completeAuthorization, wbOAuthProvider, SUPPORTED_SCOPES } from './auth/provider.js';
 import { identity } from './auth/identity/index.js';
 import { actorFromAuthInfo } from './auth/provider.js';
+import { pruneAudit } from './audit.js';
 import { config } from './config.js';
 import { cleanupExpired } from './db/index.js';
 import { logger } from './logger.js';
@@ -141,6 +142,12 @@ app.get('/', (_req, res) => {
 
 // ─── Запуск ──────────────────────────────────────────────────────────────────
 setInterval(cleanupExpired, 10 * 60 * 1000).unref();
+
+// Журнал теперь пополняется на каждый вызов инструмента, поэтому его надо
+// подрезать. Раз в сутки и один раз при старте: если сервер долго не
+// перезапускали, чистка всё равно случится.
+pruneAudit();
+setInterval(() => pruneAudit(), 24 * 60 * 60 * 1000).unref();
 
 const server = app.listen(config.port, config.host, () => {
     logger.info(

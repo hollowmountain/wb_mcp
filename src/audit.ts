@@ -35,3 +35,72 @@ export function recentAudit(limit = 50): Array<Record<string, unknown>> {
         Record<string, unknown>
     >;
 }
+
+
+/**
+ * Журнал не должен расти вечно. Девяноста дней хватает, чтобы разобрать
+ * инцидент и посмотреть, чем люди пользуются, а дальше записи только занимают
+ * место. При тысяче вызовов в день это устоится примерно на двадцати мегабайтах.
+ */
+export function pruneAudit(days = 90): number {
+    const cutoff = now() - days * 24 * 60 * 60;
+    const res = db.prepare('DELETE FROM audit WHERE ts < ?').run(cutoff);
+    const removed = Number(res.changes ?? 0);
+    if (removed > 0) logger.info({ removed, days }, 'старые записи журнала удалены');
+    return removed;
+}
+
+
+export interface ToolUsageRow {
+    actor: string;
+    tool: string;
+    calls: number;
+    denied: number;
+    errors: number;
+    avgMs: number;
+    lastTs: number;
+}
+
+/**
+ * Чем пользовались за последние дни. Ради этого запись вызовов и заводилась:
+ * по журналу отправок видно только тех, кто отвечает покупателям, а человек,
+ * который весь день читает отчёты, выглядел бездельником.
+ */
+export function toolUsage(days = 7, actor?: string): ToolUsageRow[] {
+    const since = now() - days * 24 * 60 * 60;
+    const rows = db
+        .prepare(
+            `SELECT actor, action, outcome, detail, ts FROM audit
+             WHERE ts >= ? AND action LIKE 'tool.%' ${actor ? 'AND actor = ?' : ''}`
+        )
+        .all(...(actor ? [since, actor] : [since])) as Array<{
+        actor: string;
+        action: string;
+        outcome: string;
+        detail: string | null;
+        ts: number;
+    }>;
+
+    const acc = new Map<string, ToolUsageRow & { totalMs: number }>();
+    for (const r of rows) {
+        const tool = r.action.slice('tool.'.length);
+        const key = `${r.actor}\u0000${tool}`;
+        const cur = acc.get(key) ?? {
+            actor: r.actor, tool, calls: 0, denied: 0, errors: 0, avgMs: 0, lastTs: 0, totalMs: 0
+        };
+        cur.calls += 1;
+        if (r.outcome === 'denied') cur.denied += 1;
+        if (r.outcome === 'error') cur.errors += 1;
+        if (r.ts > cur.lastTs) cur.lastTs = r.ts;
+        try {
+            const ms = r.detail ? (JSON.parse(r.detail) as { ms?: number }).ms : undefined;
+            if (typeof ms === 'number') cur.totalMs += ms;
+        } catch {
+            /* деталь не разобралась — не беда, считаем без неё */
+        }
+        acc.set(key, cur);
+    }
+    return [...acc.values()]
+        .map(v => ({ ...v, avgMs: v.calls > 0 ? Math.round(v.totalMs / v.calls) : 0 }))
+        .sort((x, y) => y.calls - x.calls);
+}
