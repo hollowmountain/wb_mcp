@@ -9,7 +9,7 @@
  * Список намеренно короткий. Каждая область должна отвечать чьей-то настоящей
  * работе, иначе она превращается в галочку, которую ставят не думая.
  */
-export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'erp', 'money'] as const;
+export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'erp', 'supply', 'money'] as const;
 
 export type Area = (typeof AREAS)[number];
 
@@ -20,6 +20,7 @@ export const AREA_LABELS: Record<Area, string> = {
     stock: 'остатки на складах',
     orders: 'заказы и возвраты на площадках',
     erp: 'учётная система 1С',
+    supply: 'поставщики и закупочные цены',
     money: 'себестоимость, прибыль, реклама'
 };
 
@@ -30,6 +31,9 @@ export const AREA_LABELS: Record<Area, string> = {
 export const AREA_NOTES: Partial<Record<Area, string>> = {
     reply: 'Без inbox бессмысленна: отвечать не на что.',
     erp: 'Отдельно от orders: у 1С нет разреза по кабинетам, там данные всей компании сразу.',
+    supply:
+        'Отделена от erp: по закупочным ценам и списку поставщиков читается вся структура наценки. ' +
+        'Складскому работнику это не нужно, а унести с собой легко.',
     money: 'Самая чувствительная. Не выдаётся по умолчанию — только явно.'
 };
 
@@ -58,12 +62,21 @@ export const PROFILES: Record<string, { label: string; areas: readonly Area[]; a
     },
     operations: {
         label: 'Закупки и склад',
+        areas: ['catalog', 'stock', 'orders', 'erp', 'supply'],
+        about:
+            'Снабжение и производство вместе с учётом в 1С, включая поставщиков и закупочные цены. ' +
+            'Переписки с покупателями не видит.'
+    },
+    warehouse: {
+        label: 'Склад и производство',
         areas: ['catalog', 'stock', 'orders', 'erp'],
-        about: 'Снабжение и производство, вместе с учётом в 1С. Переписки с покупателями не видит.'
+        about:
+            'Остатки, номенклатура, производство, движения склада. Поставщиков и закупочные цены ' +
+            'не видит — для складской работы они не нужны.'
     },
     finance: {
         label: 'Финансы',
-        areas: ['money', 'orders', 'erp', 'catalog'],
+        areas: ['money', 'orders', 'erp', 'supply', 'catalog'],
         about: 'Себестоимость, прибыль, окупаемость рекламы. Переписки с покупателями не видит.'
     },
     owner: {

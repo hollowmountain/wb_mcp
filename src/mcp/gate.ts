@@ -68,9 +68,9 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     onec_reference: 'erp',
     onec_products: 'erp',
     onec_orders: 'erp',
-    onec_partners: 'erp',
+    onec_partners: 'supply',
     onec_stock: 'erp',
-    onec_purchases: 'erp',
+    onec_purchases: 'supply',
     onec_production: 'erp',
     onec_warehouse: 'erp',
 
