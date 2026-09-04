@@ -54,6 +54,10 @@ export const ALLOWED_ENTITIES = [
     // Виртуальная таблица остатков: сами движения бесполезны без свёртки,
     // а Balance отдаёт готовый остаток на текущий момент.
     'AccumulationRegister_ЗапасыНаСкладах/Balance',
+    // Суммовой учёт запасов. Называется просто «Запасы», без слова
+    // «себестоимость» — искать его по этому слову бесполезно.
+    'AccumulationRegister_Запасы',
+    'AccumulationRegister_Запасы/Balance',
     'AccumulationRegister_Продажи',
     'AccumulationRegister_Продажи/Turnovers'
 ] as const;
@@ -307,4 +311,77 @@ export async function getOnecStock(
         warehouse: warehouses.get(r.СтруктурнаяЕдиница_Key) ?? '(склад не указан)',
         quantity: r.КоличествоBalance
     }));
+}
+
+
+export interface OnecStockValueRow {
+    productKey: string;
+    product: string;
+    placeKey: string;
+    place: string;
+    /** Свой склад или контрагент: суммы по ним смешивать нельзя. */
+    atPartner: boolean;
+    quantity: number;
+    sum: number;
+    sumNoVat: number;
+}
+
+/**
+ * Денежная оценка запасов из регистра «Запасы».
+ *
+ * Две вещи, на которых легко ошибиться.
+ *
+ * Первая: строк больше тысячи, а без сортировки страницы перекрываются —
+ * первый подсчёт дал 1000 строк вместо 2423 и занизил итог вдвое.
+ *
+ * Вторая: измерение СтруктурнаяЕдиница ссылается то на склад, то на
+ * контрагента. По своим складам суммы ведут себя правильно, а по запасам
+ * у контрагентов сумма без НДС оказывается БОЛЬШЕ суммы с НДС, чего быть
+ * не может. Поэтому части не складываются в одно число, а показываются
+ * порознь: пусть расхождение видит человек, а не прячется в итоге.
+ */
+export async function getOnecStockValue(cfg: OnecConfig): Promise<OnecStockValueRow[]> {
+    const PAGE_SIZE = 1000;
+    const raw: Array<Record<string, unknown>> = [];
+    for (let skip = 0; skip < 40_000; skip += PAGE_SIZE) {
+        const rows = await listEntity<Record<string, unknown>>(cfg, 'AccumulationRegister_Запасы/Balance', {
+            top: PAGE_SIZE,
+            skip,
+            orderby: 'Номенклатура_Key'
+        });
+        raw.push(...rows);
+        if (rows.length < PAGE_SIZE) break;
+    }
+
+    const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
+    const partnerOf = (v: unknown): boolean => String(v ?? '').endsWith('Catalog_Контрагенты');
+
+    const [products, places, partners] = await Promise.all([
+        resolveNames(cfg, 'Catalog_Номенклатура', raw.map(r => String(r.Номенклатура_Key ?? ''))),
+        resolveNames(
+            cfg,
+            'Catalog_СтруктурныеЕдиницы',
+            raw.filter(r => !partnerOf(r.СтруктурнаяЕдиница_Type)).map(r => String(r.СтруктурнаяЕдиница ?? ''))
+        ),
+        resolveNames(
+            cfg,
+            'Catalog_Контрагенты',
+            raw.filter(r => partnerOf(r.СтруктурнаяЕдиница_Type)).map(r => String(r.СтруктурнаяЕдиница ?? ''))
+        )
+    ]);
+
+    return raw.map(r => {
+        const atPartner = partnerOf(r.СтруктурнаяЕдиница_Type);
+        const placeKey = String(r.СтруктурнаяЕдиница ?? '');
+        return {
+            productKey: String(r.Номенклатура_Key ?? ''),
+            product: products.get(String(r.Номенклатура_Key ?? '')) || '(без названия)',
+            placeKey,
+            place: (atPartner ? partners : places).get(placeKey) || '(не указано)',
+            atPartner,
+            quantity: num(r.КоличествоBalance),
+            sum: num(r.СуммаBalance),
+            sumNoVat: num(r.СуммаБезНДСBalance)
+        };
+    });
 }

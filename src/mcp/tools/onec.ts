@@ -8,6 +8,7 @@ import {
     ALLOWED_ENTITIES,
     countEntity,
     getOnecStock,
+    getOnecStockValue,
     listEntity,
     resolveNames,
     type OnecEntity
@@ -212,6 +213,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 'onec_production  Заказы на производство: что и сколько запущено в работу.',
                 'onec_warehouse   Движения склада: перемещения, списания, оприходования,',
                 '                 инвентаризации за период.',
+                'onec_stock_value Запасы в деньгах: учётная себестоимость по складам.',
                 'onec_receipts    Приходные накладные с ценами: что и почём поступило.',
                 'onec_piecework   Сдельные наряды: кто из работников что сделал и на сколько.',
                 'onec_reference   Эта справка.',
@@ -220,8 +222,8 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 '',
                 'Начисления зарплаты не ведутся — документ пуст. Но сдельные наряды есть,',
                 'и в них видно, кто сколько заработал за день (onec_piecework).',
-                'Партионный учёт не ведётся, поэтому готовой себестоимости остатков в базе нет:',
-                'её собирают из приходных накладных с ценами (onec_receipts).',
+                'Денежная оценка запасов есть — onec_stock_value, регистр суммового учёта.',
+                'Партионного учёта при этом нет, партии пусты.',
                 'Отзывов, вопросов и переписки с покупателями в 1С нет — это площадки,',
                 'смотрите инструменты wb_* и ozon_*.',
                 'Себестоимости в разрезе товара маркетплейса тут тоже нет — она в nep_economy.',
@@ -696,6 +698,92 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             const total = rows.reduce((s, r) => s + (r.СуммаДокумента ?? 0), 0);
             return text(
                 `Накладных: ${shown}${needle ? '' : `, на сумму ${money(total)}`}\n\n${blocks.join('\n\n')}`
+            );
+        })
+    );
+
+    server.registerTool(
+        'onec_stock_value',
+        {
+            title: '1С: запасы в деньгах',
+            description:
+                'Денежная оценка запасов из регистра суммового учёта: сколько лежит на своих складах и ' +
+                'сколько передано контрагентам, с НДС и без. Это учётная себестоимость предприятия.',
+            inputSchema: {
+                search: z.string().optional().describe('Часть названия номенклатуры'),
+                where: z
+                    .enum(['свои склады', 'у контрагентов', 'везде'])
+                    .optional()
+                    .describe('Что показать. По умолчанию свои склады.'),
+                limit: z.number().int().min(1).max(200).optional().describe('Сколько позиций показать, по умолчанию 25')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_stock_value', async (args, extra) => {
+            const actor = actorOf(extra);
+            if (!onecReady() || !inArea(actor, 'money')) {
+                return fail('Область «себестоимость, прибыль, реклама» вам не открыта. Обратитесь к администратору.');
+            }
+            const rows = await getOnecStockValue(config.onec);
+            if (rows.length === 0) return text('Регистр суммового учёта запасов пуст.');
+
+            const own = rows.filter(r => !r.atPartner);
+            const atPartners = rows.filter(r => r.atPartner);
+            const totals = (list: typeof rows) => ({
+                sum: list.reduce((s, r) => s + r.sum, 0),
+                noVat: list.reduce((s, r) => s + r.sumNoVat, 0),
+                positions: new Set(list.map(r => r.productKey)).size
+            });
+            const o = totals(own);
+            const p = totals(atPartners);
+
+            const where = args.where ?? 'свои склады';
+            const chosen = where === 'у контрагентов' ? atPartners : where === 'везде' ? rows : own;
+            const needle = args.search?.trim().toLowerCase();
+            const wanted = needle ? chosen.filter(r => r.product.toLowerCase().includes(needle)) : chosen;
+
+            const byProduct = new Map<string, { name: string; qty: number; sum: number; noVat: number }>();
+            for (const r of wanted) {
+                const acc = byProduct.get(r.productKey) ?? { name: r.product, qty: 0, sum: 0, noVat: 0 };
+                acc.qty += r.quantity;
+                acc.sum += r.sum;
+                acc.noVat += r.sumNoVat;
+                byProduct.set(r.productKey, acc);
+            }
+            const list = [...byProduct.values()].sort((a, b) => b.sum - a.sum).slice(0, args.limit ?? 25);
+
+            const negatives = rows.filter(r => r.sum < 0);
+            const head = [
+                `ЗАПАСЫ В ДЕНЬГАХ (учётная себестоимость)`,
+                '',
+                `Свои склады:     ${money(o.sum)}   без НДС ${money(o.noVat)}   позиций ${o.positions}`,
+                `У контрагентов:  ${money(p.sum)}   без НДС ${money(p.noVat)}   позиций ${p.positions}`
+            ];
+            // Складывать эти две части в одно число нельзя, пока по второй
+            // сумма без НДС больше суммы с НДС: итог получился бы обманчивым.
+            if (p.noVat > p.sum) {
+                head.push(
+                    '',
+                    'Внимание: по запасам у контрагентов сумма без НДС больше суммы с НДС,',
+                    'чего быть не может. Общий итог не показываю — сначала стоит разобраться',
+                    'в учёте этой части. По своим складам расхождения нет.'
+                );
+            } else {
+                head.push('', `Всего: ${money(o.sum + p.sum)}   без НДС ${money(o.noVat + p.noVat)}`);
+            }
+            if (negatives.length > 0) {
+                head.push(
+                    '',
+                    `Строк с отрицательной суммой: ${negatives.length} на ${money(negatives.reduce((s, r) => s + r.sum, 0))}.`
+                );
+            }
+
+            if (list.length === 0) return text([...head, '', `По запросу «${args.search}» ничего нет.`].join('\n'));
+            const body = list.map(
+                v => `${v.name}\n   ${v.qty.toLocaleString('ru-RU')} ед. на ${money(v.sum)} (без НДС ${money(v.noVat)})`
+            );
+            return text(
+                [...head, '', `── ${where}, самые дорогие ──`, '', ...body].join('\n')
             );
         })
     );

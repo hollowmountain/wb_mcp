@@ -84,6 +84,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     // экономика
     nep_economy: 'money',
     ozon_finance: 'money',
+    onec_stock_value: 'money',
     nep_ads: 'money'
 };
 
