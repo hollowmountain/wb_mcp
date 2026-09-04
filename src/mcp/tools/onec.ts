@@ -140,11 +140,16 @@ async function renderDocuments(opts: {
     // на производство и у перемещения запасов нет СуммаДокумента, и запрос
     // с ней падал с «Сегмент пути СуммаДокумента не найден». Документов
     // берём немного, лишние байты дешевле лишней хрупкости.
-    const rows = await listEntity<DocRow>(config.onec, opts.entity, {
-        top: opts.limit,
+    // Просим на одну строку больше, чем покажем: так становится видно, что
+    // за пределом выборки ещё что-то есть. Без этого сумма по показанным
+    // документам выглядела как итог за период, хотя им не была.
+    const fetched = await listEntity<DocRow>(config.onec, opts.entity, {
+        top: opts.limit + 1,
         filter: `Date ge datetime'${from}' and Date le datetime'${to}' and DeletionMark eq false`,
         orderby: 'Date desc'
     });
+    const truncated = fetched.length > opts.limit;
+    const rows = truncated ? fetched.slice(0, opts.limit) : fetched;
     if (rows.length === 0) return text(opts.empty);
 
     const partners = opts.partnerField
@@ -183,9 +188,12 @@ async function renderDocuments(opts: {
         return `${head}\n${lines.join('\n')}${more}`;
     });
 
-    return text(
-        `Документов: ${rows.length}${total > 0 ? `, на сумму ${money(total)}` : ''}\n\n${blocks.join('\n')}`
-    );
+    const head = truncated
+        ? `Документов показано: ${rows.length}, но за период их больше` +
+          (total > 0 ? `. Сумма ${money(total)} — только по показанным, не итог за период.` : '.') +
+          '\nЧтобы увидеть всё, увеличьте limit или сузьте период.'
+        : `Документов: ${rows.length}${total > 0 ? `, на сумму ${money(total)}` : ''}`;
+    return text(`${head}\n\n${blocks.join('\n')}`);
 }
 
 export function registerOnecTools(server: McpServer, actor: Actor): void {
@@ -346,7 +354,10 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
 
             if (rows.length === 0) return text(s ? `По запросу «${s}» контрагентов не найдено.` : 'Контрагентов нет.');
             const lines = rows.map((r, i) => `${i + 1}. ${r.Description || dash}\n   код ${r.Code || dash}, ИНН ${r.ИНН || dash}`);
-            return text(`Найдено: ${rows.length}\n\n${lines.join('\n')}`);
+            const cut = rows.length >= (args.limit ?? 20);
+            return text(
+                `Показано: ${rows.length}${cut ? ' (возможно, есть ещё — увеличьте limit)' : ''}\n\n${lines.join('\n')}`
+            );
         })
     );
 
@@ -563,15 +574,21 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             const from = (args.dateFrom ?? today).slice(0, 10);
             const to = (args.dateTo ?? args.dateFrom ?? today).slice(0, 10);
 
-            const rows = await listEntity<DocRow & { Исполнитель?: string; Закрыт?: boolean }>(
+            const askedFor = args.limit ?? 50;
+            const fetched = await listEntity<DocRow & { Исполнитель?: string; Закрыт?: boolean }>(
                 config.onec,
                 'Document_СдельныйНаряд',
                 {
-                    top: args.limit ?? 50,
+                    // На одну больше, чем покажем: иначе свод по исполнителям и
+                    // сумма посчитались бы по обрезанной выборке и выглядели бы
+                    // как итог за период. Для проверки зарплаты это опасно.
+                    top: askedFor + 1,
                     filter: `Date ge datetime'${from}T00:00:00' and Date le datetime'${to}T23:59:59' and DeletionMark eq false`,
                     orderby: 'Date desc'
                 }
             );
+            const truncated = fetched.length > askedFor;
+            const rows = truncated ? fetched.slice(0, askedFor) : fetched;
             if (rows.length === 0) return text(`Сдельных нарядов за ${from}${to === from ? '' : ` — ${to}`} нет.`);
 
             const people = await resolveNames(
@@ -642,8 +659,12 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
 
             return text(
                 [
-                    `${from}${to === from ? '' : ` — ${to}`}: нарядов ${wanted.length}, на сумму ${money(total)}` +
-                        (notPosted > 0 ? `, из них не проведено ${notPosted}` : ''),
+                    truncated
+                        ? `${from}${to === from ? '' : ` — ${to}`}: показано ${wanted.length} нарядов, но за период их больше.` +
+                          `\nСумма ${money(total)} и свод ниже — только по показанным, НЕ итог за период.` +
+                          `\nДля полной картины увеличьте limit или возьмите период короче.`
+                        : `${from}${to === from ? '' : ` — ${to}`}: нарядов ${wanted.length}, на сумму ${money(total)}` +
+                          (notPosted > 0 ? `, из них не проведено ${notPosted}` : ''),
                     '',
                     'По исполнителям:',
                     ...svod,
