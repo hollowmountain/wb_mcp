@@ -391,3 +391,55 @@ export async function getOzonFinanceTotals(
     const net = Object.values(totals).reduce((a, b) => a + b, 0);
     return { ...totals, net };
 }
+
+
+// ─── Постраничный сбор ───────────────────────────────────────────────────────
+//
+// Ozon отдаёт не больше тысячи строк за раз и присылает метку продолжения:
+// last_id у списка товаров, cursor у остатков и цен. Кабинеты сейчас
+// маленькие — от 36 до 62 товаров, — но полагаться на это нельзя: вырастет
+// ассортимент, и остатки молча покажутся неполными. Ровно так уже вышло
+// в 1С, где из 2423 строк бралась тысяча.
+
+const PAGE = 1000;
+/** Предохранитель от бесконечного цикла, если площадка перестанет двигать метку. */
+const MAX_PAGES = 50;
+
+export async function listAllOzonProducts(cabinet: OzonCabinet): Promise<OzonProduct[]> {
+    const out: OzonProduct[] = [];
+    let lastId = '';
+    for (let page = 0; page < MAX_PAGES; page++) {
+        const res = await listOzonProducts(cabinet, { limit: PAGE, lastId });
+        const items = res.result?.items ?? [];
+        out.push(...items);
+        lastId = res.result?.last_id ?? '';
+        if (items.length < PAGE || !lastId) break;
+    }
+    return out;
+}
+
+export async function getAllOzonStocks(cabinet: OzonCabinet): Promise<OzonStockRow[]> {
+    const out: OzonStockRow[] = [];
+    let cursor = '';
+    for (let page = 0; page < MAX_PAGES; page++) {
+        const res = await getOzonStocks(cabinet, { limit: PAGE, cursor });
+        const items = res.items ?? [];
+        out.push(...items);
+        cursor = res.cursor ?? '';
+        if (items.length < PAGE || !cursor) break;
+    }
+    return out;
+}
+
+export async function getAllOzonPrices(cabinet: OzonCabinet): Promise<OzonPriceRow[]> {
+    const out: OzonPriceRow[] = [];
+    let cursor = '';
+    for (let page = 0; page < MAX_PAGES; page++) {
+        const res = await getOzonPrices(cabinet, { limit: PAGE, cursor });
+        const items = res.items ?? [];
+        out.push(...items);
+        cursor = res.cursor ?? '';
+        if (items.length < PAGE || !cursor) break;
+    }
+    return out;
+}

@@ -547,12 +547,17 @@ export function registerReadTools(server: McpServer, actor: Actor): void {
         },
         guarded('wb_orders', async (args, extra) =>
             overCabinets(actorOf(extra), args.cabinet, async cabinet => {
-                const { orders } = await listFbsOrders(cabinet, { limit: args.limit ?? 50 });
+                // Просим на один больше, чем покажем: без этого «Заказов
+                // в выборке: 50» невозможно отличить от «их ровно пятьдесят».
+                const asked = args.limit ?? 50;
+                const { orders: fetched } = await listFbsOrders(cabinet, { limit: asked + 1 });
+                const more = fetched.length > asked;
+                const orders = more ? fetched.slice(0, asked) : fetched;
                 const picked = args.nmId === undefined ? orders : orders.filter(o => o.nmId === args.nmId);
                 const blocks = picked.slice(0, 30).map((o, i) => formatFbsOrder(o, i + 1));
                 const head =
                     args.nmId === undefined
-                        ? `Заказов в выборке: ${orders.length}`
+                        ? `Заказов в выборке: ${orders.length}${more ? ' — показаны не все, заказов больше' : ''}`
                         : `Заказов по nmID ${args.nmId}: ${picked.length} из ${orders.length} просмотренных`;
                 const tail = picked.length > 30 ? `\n\n… ещё заказов: ${picked.length - 30}` : '';
                 return `${head}\n\n${joinBlocks(blocks, 'Заказов нет')}${tail}`;

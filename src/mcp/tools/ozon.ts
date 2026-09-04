@@ -6,8 +6,8 @@ import { config } from '../../config.js';
 import {
     getOzonAnalytics,
     getOzonFinanceTotals,
-    getOzonPrices,
-    getOzonStocks,
+    getAllOzonPrices,
+    getAllOzonStocks,
     getOzonWarehouseStocks,
     listFboPostings,
     listFbsPostings,
@@ -143,12 +143,12 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
             overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const want = args.limit ?? 20;
                 const [stocks, prices] = await Promise.all([
-                    getOzonStocks(cabinet, { limit: 1000 }),
-                    getOzonPrices(cabinet, { limit: 1000 })
+                    getAllOzonStocks(cabinet),
+                    getAllOzonPrices(cabinet)
                 ]);
 
-                const priceBy = new Map(prices.items.map(p => [p.offer_id, p]));
-                let rows = stocks.items;
+                const priceBy = new Map(prices.map(p => [p.offer_id, p]));
+                let rows = stocks;
                 const s = args.search?.trim().toLowerCase();
                 if (s) rows = rows.filter(r => r.offer_id.toLowerCase().includes(s));
                 if (rows.length === 0) return s ? `По артикулу «${args.search}» ничего не найдено.` : 'Товаров нет.';
@@ -194,12 +194,28 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                 const blocks: string[] = [];
 
                 if (args.scheme !== 'fbs') {
-                    const fbo = (await listFboPostings(cabinet, since, to, want)).result ?? [];
-                    blocks.push(fbo.length === 0 ? 'FBO (склады Ozon): заказов нет' : `FBO (склады Ozon): ${fbo.length}\n${fmt(fbo)}`);
+                    // Просим на один больше: иначе не отличить «столько и есть»
+                    // от «столько поместилось».
+                    const fboAll = (await listFboPostings(cabinet, since, to, want + 1)).result ?? [];
+                    const fboMore = fboAll.length > want;
+                    const fbo = fboMore ? fboAll.slice(0, want) : fboAll;
+                    blocks.push(
+                        fbo.length === 0
+                            ? 'FBO (склады Ozon): заказов нет'
+                            : `FBO (склады Ozon): ${fbo.length}${fboMore ? ' — показаны не все, за период их больше' : ''}\n${fmt(fbo)}`
+                    );
                 }
                 if (args.scheme !== 'fbo') {
-                    const fbs = (await listFbsPostings(cabinet, since, to, want)).result?.postings ?? [];
-                    blocks.push(fbs.length === 0 ? 'FBS (склад продавца): заказов нет' : `FBS (склад продавца): ${fbs.length}\n${fmt(fbs)}`);
+                    const fbsRes = (await listFbsPostings(cabinet, since, to, want + 1)).result;
+                    const fbsAll = fbsRes?.postings ?? [];
+                    // У FBS площадка вдобавок сама говорит, есть ли продолжение.
+                    const fbsMore = fbsAll.length > want || fbsRes?.has_next === true;
+                    const fbs = fbsAll.length > want ? fbsAll.slice(0, want) : fbsAll;
+                    blocks.push(
+                        fbs.length === 0
+                            ? 'FBS (склад продавца): заказов нет'
+                            : `FBS (склад продавца): ${fbs.length}${fbsMore ? ' — показаны не все, за период их больше' : ''}\n${fmt(fbs)}`
+                    );
                 }
                 return blocks.join('\n\n');
 
