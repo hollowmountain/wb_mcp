@@ -401,7 +401,6 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 grouped.set(r.product, acc);
             }
             const list = [...grouped.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, args.limit ?? 30);
-            const total = [...grouped.values()].reduce((s, g) => s + g.total, 0);
 
             const lines = list.map(([name, g]) => {
                 const places = g.places
@@ -414,9 +413,11 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     `\n   ${places.join(', ')}${hidden > 0 ? ` и ещё ${hidden}` : ''}`
                 );
             });
-            return text(
-                `Позиций с остатком: ${grouped.size}, всего единиц: ${total.toLocaleString('ru-RU')}\n\n${lines.join('\n')}`
-            );
+            // Общей суммы здесь намеренно нет: у номенклатуры разные единицы
+            // измерения, и складывать штуки с килограммами и метрами
+            // бессмысленно. Итог имеет смысл только внутри одной позиции.
+            const shown = list.length < grouped.size ? ` (показаны ${list.length} с наибольшим остатком)` : '';
+            return text(`Позиций с остатком: ${grouped.size}${shown}\n\n${lines.join('\n')}`);
         })
     );
 
