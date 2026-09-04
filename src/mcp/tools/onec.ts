@@ -74,7 +74,16 @@ interface SalesOrder {
  * «Запасы». Отдельными сущностями вида Document_X_Товары они НЕ публикуются —
  * такой запрос вернёт «сущность не найдена».
  */
-const ITEM_SECTIONS = ['Запасы', 'Товары', 'Материалы', 'Продукция'] as const;
+const ITEM_SECTIONS = ['Продукция', 'Запасы', 'Товары', 'Материалы', 'Расходы'] as const;
+
+/** Как называть секцию человеку, когда их в документе несколько. */
+const SECTION_TITLE: Record<string, string> = {
+    Продукция: 'выпускаем',
+    Запасы: 'запасы',
+    Товары: 'товары',
+    Материалы: 'материалы',
+    Расходы: 'расходы и услуги'
+};
 
 interface DocRow {
     Ref_Key: string;
@@ -110,13 +119,27 @@ interface PieceworkOp {
     Нормочасы?: number;
 }
 
-const itemsOf = (doc: DocRow): DocItem[] => {
+/**
+ * Все непустые табличные части документа, а не первая попавшаяся.
+ *
+ * Так было: брали первую подходящую секцию и на этом останавливались.
+ * У приходной накладной за услуги состав лежит в «Расходах», а «Запасы»
+ * пусты — такие документы показывались вовсе без состава, а их в выборке
+ * была треть, на суммы до 1,8 млн ₽. У документа, где есть и запасы,
+ * и расходы, сумма строк не сходилась с суммой документа ровно на расходы.
+ * А у заказа на производство пряталась «Продукция» — то, ради чего заказ
+ * и заводят.
+ */
+const sectionsOf = (doc: DocRow): Array<{ name: string; items: DocItem[] }> => {
+    const out: Array<{ name: string; items: DocItem[] }> = [];
     for (const section of ITEM_SECTIONS) {
         const v = doc[section];
-        if (Array.isArray(v) && v.length > 0) return v as DocItem[];
+        if (Array.isArray(v) && v.length > 0) out.push({ name: section, items: v as DocItem[] });
     }
-    return [];
+    return out;
 };
+
+const itemsOf = (doc: DocRow): DocItem[] => sectionsOf(doc).flatMap(s => s.items);
 
 /**
  * Единая отрисовка журнала документов: они устроены одинаково, отличаются
@@ -176,16 +199,27 @@ async function renderDocuments(opts: {
             (r.СуммаДокумента ? ` ${dash} ${money(r.СуммаДокумента)}` : '') +
             (r.Posted === false ? ' (не проведён)' : '');
         if (!opts.withItems) return head;
-        const items = itemsOf(r);
-        if (items.length === 0) return `${head}\n   состав пуст`;
-        const lines = items.slice(0, 20).map(it => {
-            const key = String(it.Номенклатура ?? it.Номенклатура_Key ?? '');
-            const name = products.get(key) || '(без названия)';
-            const qty = typeof it.Количество === 'number' ? it.Количество.toLocaleString('ru-RU') : dash;
-            return `   ${name} ${dash} ${qty}${it.Сумма ? ` на ${money(it.Сумма)}` : ''}`;
-        });
-        const more = items.length > 20 ? `\n   и ещё ${items.length - 20} строк` : '';
-        return `${head}\n${lines.join('\n')}${more}`;
+        const sections = sectionsOf(r);
+        if (sections.length === 0) return `${head}\n   состав пуст`;
+        const render = (items: DocItem[]): string => {
+            const lines = items.slice(0, 20).map(it => {
+                const key = String(it.Номенклатура ?? it.Номенклатура_Key ?? '');
+                const name = products.get(key) || '(без названия)';
+                const qty = typeof it.Количество === 'number' ? it.Количество.toLocaleString('ru-RU') : dash;
+                return `   ${name} ${dash} ${qty}${it.Сумма ? ` на ${money(it.Сумма)}` : ''}`;
+            });
+            const more = items.length > 20 ? `\n   и ещё ${items.length - 20} строк` : '';
+            return lines.join('\n') + more;
+        };
+        // Когда секция одна, подпись только мешает. Когда их несколько —
+        // без неё непонятно, что материалы, а что выпуск.
+        const body =
+            sections.length === 1
+                ? render(sections[0]!.items)
+                : sections
+                      .map(s => `   ── ${SECTION_TITLE[s.name] ?? s.name} ──\n${render(s.items)}`)
+                      .join('\n');
+        return `${head}\n${body}`;
     });
 
     const head = truncated
