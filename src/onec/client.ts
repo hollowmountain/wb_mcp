@@ -190,6 +190,17 @@ const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
  * на справочник. $expand тоже работает, но тянет карточку целиком — на сотне
  * строк это мегабайты ради одного поля.
  */
+const nameCache = new Map<string, { at: number; names: Map<string, string> }>();
+const NAME_TTL = 10 * 60 * 1000;
+
+/**
+ * Сколько ссылок влезает в один фильтр. Веб-сервер перед 1С (IIS) режет
+ * строку запроса примерно на двух тысячах знаков и отвечает 404.15 —
+ * страницей об ошибке, а не JSON. Проверено: 25 ссылок проходят (1696 знаков),
+ * 30 уже нет. Берём 20 с запасом.
+ */
+const REFS_PER_QUERY = 20;
+
 export async function resolveNames(
     cfg: OnecConfig,
     entity: OnecEntity,
@@ -199,17 +210,32 @@ export async function resolveNames(
     const names = new Map<string, string>();
     if (unique.length === 0) return names;
 
-    // Длина строки запроса не бесконечна: рвём на куски по полсотни ссылок.
-    for (let i = 0; i < unique.length; i += 50) {
-        const chunk = unique.slice(i, i + 50);
-        const filter = chunk.map(k => `Ref_Key eq guid'${k}'`).join(' or ');
-        const rows = await listEntity<{ Ref_Key: string; Description?: string; Наименование?: string }>(
-            cfg,
-            entity,
-            { top: chunk.length, filter, select: 'Ref_Key,Description' }
-        );
-        for (const r of rows) names.set(r.Ref_Key, r.Description ?? r.Наименование ?? '');
+    // Справочники меняются редко, а один и тот же товар встречается в остатках
+    // на десятке складов. Без памяти каждый вызов заново гонял бы сотни ссылок.
+    const cached = nameCache.get(entity);
+    const fresh = cached && Date.now() - cached.at < NAME_TTL ? cached.names : new Map<string, string>();
+    const missing: string[] = [];
+    for (const k of unique) {
+        const known = fresh.get(k);
+        if (known === undefined) missing.push(k);
+        else names.set(k, known);
     }
+
+    for (let i = 0; i < missing.length; i += REFS_PER_QUERY) {
+        const chunk = missing.slice(i, i + REFS_PER_QUERY);
+        const filter = chunk.map(k => `Ref_Key eq guid'${k}'`).join(' or ');
+        const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity, {
+            top: chunk.length,
+            filter,
+            select: 'Ref_Key,Description'
+        });
+        for (const r of rows) {
+            const name = r.Description ?? '';
+            names.set(r.Ref_Key, name);
+            fresh.set(r.Ref_Key, name);
+        }
+    }
+    nameCache.set(entity, { at: cached && Date.now() - cached.at < NAME_TTL ? cached.at : Date.now(), names: fresh });
     return names;
 }
 
