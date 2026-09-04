@@ -155,10 +155,11 @@ async function fetchEntity<T>(
 export async function listEntity<T>(
     cfg: OnecConfig,
     entity: OnecEntity,
-    opts: { top?: number; filter?: string; select?: string; orderby?: string; expand?: string } = {}
+    opts: { top?: number; skip?: number; filter?: string; select?: string; orderby?: string; expand?: string } = {}
 ): Promise<T[]> {
     const res = await fetchEntity<{ value: T[] }>(cfg, entity, {
         $top: Math.min(opts.top ?? 50, 1000),
+        $skip: opts.skip,
         $filter: opts.filter,
         $select: opts.select,
         $orderby: opts.orderby,
@@ -201,6 +202,10 @@ const NAME_TTL = 10 * 60 * 1000;
  */
 const REFS_PER_QUERY = 20;
 
+/** Сколько неизвестных ссылок оправдывают выкачивание справочника целиком. */
+const WHOLESALE_FROM = 60;
+const PAGE = 1000;
+
 export async function resolveNames(
     cfg: OnecConfig,
     entity: OnecEntity,
@@ -221,18 +226,36 @@ export async function resolveNames(
         else names.set(k, known);
     }
 
-    for (let i = 0; i < missing.length; i += REFS_PER_QUERY) {
-        const chunk = missing.slice(i, i + REFS_PER_QUERY);
-        const filter = chunk.map(k => `Ref_Key eq guid'${k}'`).join(' or ');
-        const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity, {
-            top: chunk.length,
-            filter,
-            select: 'Ref_Key,Description'
-        });
-        for (const r of rows) {
-            const name = r.Description ?? '';
-            names.set(r.Ref_Key, name);
-            fresh.set(r.Ref_Key, name);
+    // Когда неизвестных ссылок много, дешевле забрать справочник целиком.
+    // Остатки дают около семисот разных товаров, то есть 35 запросов по 20
+    // ссылок — а с ограничителем в 4 запроса в секунду это больше полуминуты
+    // ожидания. Номенклатура же целиком (5216 позиций) выкачивается шестью
+    // страницами меньше чем за секунду.
+    if (missing.length > WHOLESALE_FROM) {
+        for (let skip = 0; skip < 50_000; skip += PAGE) {
+            const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity, {
+                top: PAGE,
+                skip,
+                select: 'Ref_Key,Description'
+            });
+            for (const r of rows) fresh.set(r.Ref_Key, r.Description ?? '');
+            if (rows.length < PAGE) break;
+        }
+        for (const k of missing) names.set(k, fresh.get(k) ?? '');
+    } else {
+        for (let i = 0; i < missing.length; i += REFS_PER_QUERY) {
+            const chunk = missing.slice(i, i + REFS_PER_QUERY);
+            const filter = chunk.map(k => `Ref_Key eq guid'${k}'`).join(' or ');
+            const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity, {
+                top: chunk.length,
+                filter,
+                select: 'Ref_Key,Description'
+            });
+            for (const r of rows) {
+                const name = r.Description ?? '';
+                names.set(r.Ref_Key, name);
+                fresh.set(r.Ref_Key, name);
+            }
         }
     }
     nameCache.set(entity, { at: cached && Date.now() - cached.at < NAME_TTL ? cached.at : Date.now(), names: fresh });
