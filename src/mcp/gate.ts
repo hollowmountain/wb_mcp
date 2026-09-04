@@ -68,8 +68,12 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     onec_orders: 'erp',
     onec_partners: 'erp',
 
+    // Продажи по географии остаются вместе с заказами: это выручка площадки,
+    // а не себестоимость, и сотрудники видели их с самого начала. Отбирать
+    // задним числом то, чем уже пользуются, — плохой способ вводить правила.
+    wb_regions: 'orders',
+
     // экономика
-    wb_regions: 'money',
     nep_economy: 'money',
     nep_ads: 'money'
 };
