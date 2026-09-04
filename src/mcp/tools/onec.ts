@@ -2,7 +2,8 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import type { Actor } from '../../auth/provider.js';
-import { canUseOnec, config } from '../../config.js';
+import { config } from '../../config.js';
+import { inArea } from '../../auth/provider.js';
 import { ALLOWED_ENTITIES, countEntity, listEntity, type OnecEntity } from '../../onec/client.js';
 import { actorOf, fail, guarded, text } from './common.js';
 
@@ -16,9 +17,18 @@ const money = (v: unknown): string =>
 
 const day = (v: unknown): string => (typeof v === 'string' && v.length >= 10 ? v.slice(0, 10) : dash);
 
-function denyIfNotAllowed(actor: Actor): string | null {
-    if (canUseOnec(actor.email)) return null;
-    return 'Доступ к 1С для вашей учётной записи не открыт. Обратитесь к администратору, если это нужно по работе.';
+/**
+ * 1С разграничивается теми же областями, что и площадки: номенклатура — это
+ * catalog, заказы и контрагенты — orders. Отдельного списка почт больше нет,
+ * иначе на каждый новый источник заводился бы свой замок.
+ */
+const onecReady = (): boolean => Boolean(config.onec.baseUrl && config.onec.user);
+
+const anyOnec = (actor: Actor): boolean => onecReady() && (inArea(actor, 'catalog') || inArea(actor, 'orders'));
+
+function denyUnless(actor: Actor, area: 'catalog' | 'orders'): string | null {
+    if (onecReady() && inArea(actor, area)) return null;
+    return `Эта часть 1С вам не открыта: нужна область «${area}». Обратитесь к администратору.`;
 }
 
 interface Product {
@@ -50,7 +60,7 @@ interface SalesOrder {
 }
 
 export function registerOnecTools(server: McpServer, actor: Actor): void {
-    if (!canUseOnec(actor.email)) return;
+    if (!anyOnec(actor)) return;
 
     server.registerTool(
         'onec_reference',
@@ -62,7 +72,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('onec_reference', async (_args, extra) => {
-            const denied = denyIfNotAllowed(actorOf(extra));
+            const denied = anyOnec(actorOf(extra)) ? null : 'Доступ к 1С вам не открыт.';
             if (denied) return fail(denied);
 
             const lines = ['Коннектору открыты только эти разделы 1С, остальное для него не существует:', ''];
@@ -91,7 +101,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('onec_products', async (args, extra) => {
-            const denied = denyIfNotAllowed(actorOf(extra));
+            const denied = denyUnless(actorOf(extra), 'catalog');
             if (denied) return fail(denied);
 
             const s = args.search?.trim();
@@ -130,7 +140,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('onec_partners', async (args, extra) => {
-            const denied = denyIfNotAllowed(actorOf(extra));
+            const denied = denyUnless(actorOf(extra), 'orders');
             if (denied) return fail(denied);
 
             const s = args.search?.trim();
@@ -169,7 +179,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('onec_orders', async (args, extra) => {
-            const denied = denyIfNotAllowed(actorOf(extra));
+            const denied = denyUnless(actorOf(extra), 'orders');
             if (denied) return fail(denied);
 
             // 1С ждёт дату без часового пояса, в формате ISO.

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 
-import { config } from '../config.js';
+import { areasOf, config } from '../config.js';
 import { db, kvGet, kvSet } from '../db/index.js';
 import { logger } from '../logger.js';
 import type { Cabinet } from '../wb/cabinets.js';
@@ -160,6 +160,14 @@ export function panelRouter(): Router {
                     : db.prepare('SELECT email, name, last_seen FROM users WHERE email = ?').all(session.email)
             ) as Array<{ email: string; name: string | null; last_seen: number }>;
 
+            const areasOfUser = (email: string): string => {
+                const row = db.prepare('SELECT areas FROM users WHERE email = ?').get(email) as
+                    | { areas: string | null }
+                    | undefined;
+                const list = areasOf(email, row?.areas);
+                return row?.areas ? list.join(', ') : `${list.join(', ')} (по умолчанию)`;
+            };
+
             const scopeOf = (email: string): string => {
                 const row = db.prepare('SELECT cabinets FROM users WHERE email = ?').get(email) as
                     | { cabinets: string | null }
@@ -218,7 +226,7 @@ export function panelRouter(): Router {
                 renderPanel({
                     session,
                     cabinets,
-                    users: users.map(u => ({ ...u, role: roleLabel(u.email), scope: scopeOf(u.email) })),
+                    users: users.map(u => ({ ...u, role: roleLabel(u.email), scope: scopeOf(u.email), areas: areasOfUser(u.email) })),
                     isAdmin,
                     audit,
                     drafts: { pending: byStatus('pending'), sent: byStatus('sent'), failed: byStatus('failed') },

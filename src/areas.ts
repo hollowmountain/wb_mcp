@@ -1,0 +1,85 @@
+/**
+ * Области данных — вторая ось доступа, независимая от кабинетов.
+ *
+ * Кабинет отвечает на вопрос «где», область — на вопрос «что». До их появления
+ * разграничение было только по кабинетам: человек, отвечающий на отзывы, видел
+ * заодно заказы, возвраты и продажи по географии — не потому что так решили,
+ * а потому что отобрать было нечем.
+ *
+ * Список намеренно короткий. Каждая область должна отвечать чьей-то настоящей
+ * работе, иначе она превращается в галочку, которую ставят не думая.
+ */
+export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'money'] as const;
+
+export type Area = (typeof AREAS)[number];
+
+export const AREA_LABELS: Record<Area, string> = {
+    inbox: 'обращения покупателей',
+    reply: 'право отвечать покупателям',
+    catalog: 'товары и цены',
+    stock: 'остатки на складах',
+    orders: 'заказы, возвраты, контрагенты',
+    money: 'себестоимость, прибыль, реклама'
+};
+
+/**
+ * Право отвечать отделено от права читать обращения намеренно: менеджеру
+ * площадки нужно видеть переписку, но отправлять он не должен.
+ */
+export const AREA_NOTES: Partial<Record<Area, string>> = {
+    reply: 'Без inbox бессмысленна: отвечать не на что.',
+    money: 'Самая чувствительная. Не выдаётся по умолчанию — только явно.'
+};
+
+/**
+ * Что получает человек, которому области не назначали.
+ *
+ * Ровно то, что он видел до появления этой оси, за вычетом экономики: она и
+ * раньше требовала отдельного разрешения. Поэтому выкатка никого ничего не
+ * лишает, а заполнять поле можно постепенно.
+ */
+export const DEFAULT_AREAS: readonly Area[] = ['inbox', 'catalog', 'stock', 'orders'];
+
+/** Готовые наборы под настоящие роли в компании. */
+export const PROFILES: Record<string, { label: string; areas: readonly Area[]; about: string }> = {
+    support: {
+        label: 'Поддержка покупателей',
+        areas: ['inbox', 'reply', 'catalog', 'stock'],
+        about: 'Отвечает на отзывы, вопросы и в чаты. Видит товар и наличие, чтобы ответить по делу.'
+    },
+    manager: {
+        label: 'Менеджер площадки',
+        areas: ['inbox', 'catalog', 'stock', 'orders'],
+        about: 'Ведёт площадку: товары, остатки, заказы, возвраты. Переписку видит, отвечать не может.'
+    },
+    operations: {
+        label: 'Закупки и склад',
+        areas: ['catalog', 'stock', 'orders'],
+        about: 'Снабжение и производство. Переписки с покупателями не видит.'
+    },
+    finance: {
+        label: 'Финансы',
+        areas: ['money', 'orders', 'catalog'],
+        about: 'Себестоимость, прибыль, окупаемость рекламы. Переписки с покупателями не видит.'
+    },
+    owner: {
+        label: 'Владелец',
+        areas: [...AREAS],
+        about: 'Всё без ограничений.'
+    }
+};
+
+const known = new Set<string>(AREAS);
+
+export function parseAreas(raw: string | null | undefined): Area[] {
+    return (raw ?? '')
+        .split(',')
+        .map(s => s.trim().toLowerCase())
+        .filter((s): s is Area => known.has(s));
+}
+
+export const isArea = (s: string): s is Area => known.has(s);
+
+export function describeAreas(areas: readonly Area[]): string {
+    return areas.length === 0 ? 'ничего' : areas.map(a => `${a} (${AREA_LABELS[a]})`).join(', ');
+}

@@ -133,6 +133,10 @@ addColumnIfMissing('invites', 'used_count', 'INTEGER NOT NULL DEFAULT 0');
 // Колонка used_count появилась позже отметки used_at и заполнилась нулями.
 // Без этого коды, которыми уже входили, снова стали бы действительными.
 db.prepare('UPDATE invites SET used_count = 1 WHERE used_at IS NOT NULL AND used_count = 0').run();
+// Области доступа: вторая ось рядом с кабинетами. NULL — области не назначали,
+// человек получает набор по умолчанию, см. areasOf в config.ts.
+addColumnIfMissing('users', 'areas', 'TEXT');
+addColumnIfMissing('invites', 'areas', 'TEXT');
 addColumnIfMissing('drafts', 'cabinet', "TEXT NOT NULL DEFAULT 'main'");
 addColumnIfMissing('audit', 'cabinet', 'TEXT');
 

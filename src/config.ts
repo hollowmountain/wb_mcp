@@ -1,5 +1,6 @@
 import { config as loadEnv } from 'dotenv';
 import { z } from 'zod';
+import { DEFAULT_AREAS, parseAreas, type Area } from './areas.js';
 import type { OzonCabinet } from './ozon/client.js';
 import { buildCabinet, CabinetRegistry, type Cabinet } from './wb/cabinets.js';
 
@@ -39,12 +40,10 @@ const schema = z.object({
     ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
     REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(2592000),
     NEPSELL_TOKEN: z.string().default(''),
-    NEPSELL_EMAILS: z.string().default(''),
 
     ONEC_BASE_URL: z.string().default(''),
     ONEC_USER: z.string().default(''),
     ONEC_PASSWORD: z.string().default(''),
-    ONEC_EMAILS: z.string().default(''),
     LOG_LEVEL: z.string().default('info')
 });
 
@@ -179,9 +178,10 @@ export const config = {
     access: {
         domains: allowedDomains,
         emails: allowedEmails,
+        // Наследие: питает набор по умолчанию для тех, кому области ещё не
+        // назначали. Когда всем проставят areas, этот список можно убрать.
         responders: csv(env.RESPONDER_EMAILS),
-        nepsell: csv(env.NEPSELL_EMAILS),
-        onec: csv(env.ONEC_EMAILS),
+
         admins: adminEmails
     },
 
@@ -215,24 +215,22 @@ export function canSend(role: Role): boolean {
 }
 
 /**
- * Кому открыт Nepsell. Отдельный список, а не роль: там себестоимость и
- * экономика, и видеть их должен не тот, кто отвечает на отзывы, а тот, кому
- * это по работе. Администраторы видят всегда.
+ * Области, доступные человеку.
+ *
+ * Пустое поле означает, что области ему не назначали. Тогда он получает то же,
+ * что видел до появления этой оси: обращения, товары, остатки и заказы, плюс
+ * право отвечать — если оно у него было по старому списку, — плюс экономику,
+ * если он администратор. Так выкатка никого ничего не лишает.
  */
-export function canUseNepsell(email: string): boolean {
-    if (!config.nepsell.token) return false;
-    const e = email.toLowerCase();
-    return config.access.admins.includes(e) || config.access.nepsell.includes(e);
+export function areasOf(email: string, stored: string | null | undefined): Area[] {
+    const explicit = parseAreas(stored);
+    if (explicit.length > 0) return explicit;
+
+    const areas = new Set<Area>(DEFAULT_AREAS);
+    const role = roleForEmail(email);
+    if (role === 'responder' || role === 'admin') areas.add('reply');
+    if (role === 'admin') areas.add('money');
+    return [...areas];
 }
 
-/**
- * Кому открыта 1С. Список отдельный от Nepsell: это разные источники и
- * разная чувствительность. В базе «Красота» зарплата не ведётся — все
- * зарплатные объекты пустые, проверено, — но справочники сотрудников и
- * физических лиц там есть, поэтому список держим коротким.
- */
-export function canUseOnec(email: string): boolean {
-    if (!config.onec.baseUrl || !config.onec.user) return false;
-    const e = email.toLowerCase();
-    return config.access.admins.includes(e) || config.access.onec.includes(e);
-}
+

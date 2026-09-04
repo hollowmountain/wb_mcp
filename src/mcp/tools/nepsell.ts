@@ -1,7 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import { canUseNepsell, config } from '../../config.js';
+import { config } from '../../config.js';
+import { inArea } from '../../auth/provider.js';
 import type { Actor } from '../../auth/provider.js';
 import { getAdMetrics, getFinances, listAdCampaigns, listNepsellClients } from '../../nepsell/client.js';
 import { linkCabinets, summariseAds, summariseFinances } from '../../nepsell/economy.js';
@@ -42,14 +43,17 @@ async function resolveLinks(actor: Actor, slug: string | undefined) {
     return links;
 }
 
-/** Nepsell закрыт всем, кроме названных. Проверяем и здесь: список инструментов у клиента кэшируется. */
+/** Проверяем и здесь, не только при регистрации: список инструментов у клиента кэшируется. */
 function denyIfNotAllowed(actor: Actor): string | null {
-    if (canUseNepsell(actor.email)) return null;
-    return 'Доступ к данным Nepsell для вашей учётной записи не открыт. Там себестоимость и экономика — обратитесь к администратору, если это нужно по работе.';
+    if (available(actor)) return null;
+    return 'Область «себестоимость и прибыль» вам не открыта. Обратитесь к администратору, если это нужно по работе.';
 }
 
+/** Nepsell живёт целиком в области money: там себестоимость и прибыль. */
+const available = (actor: Actor): boolean => Boolean(config.nepsell.token) && inArea(actor, 'money');
+
 export function registerNepsellTools(server: McpServer, actor: Actor): void {
-    if (!canUseNepsell(actor.email)) return;
+    if (!available(actor)) return;
 
     server.registerTool(
         'nep_cabinets',

@@ -7,6 +7,7 @@ interface InviteRow {
     code: string;
     email: string;
     cabinets: string | null;
+    areas: string | null;
     max_uses: number;
     used_count: number;
     used_at: number | null;
@@ -41,7 +42,7 @@ export const inviteIdentity: IdentityProvider = {
             }
 
             const row = db
-                .prepare('SELECT code, email, cabinets, max_uses, used_count, used_at FROM invites WHERE code = ?')
+                .prepare('SELECT code, email, cabinets, areas, max_uses, used_count, used_at FROM invites WHERE code = ?')
                 .get(code) as InviteRow | undefined;
 
             if (!row) {
@@ -62,7 +63,15 @@ export const inviteIdentity: IdentityProvider = {
                 .split(',')
                 .map(s => s.trim())
                 .filter(Boolean);
-            await complete(pendingId, { email: row.email, ...(scope.length > 0 ? { cabinets: scope } : {}) }, res);
+            await complete(
+                pendingId,
+                {
+                    email: row.email,
+                    ...(scope.length > 0 ? { cabinets: scope } : {}),
+                    ...(row.areas ? { areas: row.areas.split(',').filter(Boolean) } : {})
+                },
+                res
+            );
         });
 
         return router;

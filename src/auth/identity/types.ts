@@ -9,6 +9,8 @@ export interface VerifiedIdentity {
      * одноразовый код может быть выдан на один конкретный кабинет.
      */
     cabinets?: string[];
+    /** Области доступа. Пусто — набор по умолчанию. */
+    areas?: string[];
 }
 
 /**

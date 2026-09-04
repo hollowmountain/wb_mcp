@@ -31,7 +31,7 @@ export interface OzonStatus {
 export interface PanelData {
     session: PanelSession;
     cabinets: CabinetStatus[];
-    users: Array<{ email: string; name: string | null; last_seen: number; role: string; scope: string }>;
+    users: Array<{ email: string; name: string | null; last_seen: number; role: string; scope: string; areas: string }>;
     audit: Array<{ ts: number; cabinet: string | null; actor: string; action: string; target: string | null; outcome: string }>;
     drafts: { pending: number; sent: number; failed: number };
     draftsByCabinet: Array<{ cabinet: string; pending: number }>;
@@ -291,8 +291,8 @@ export function renderPanel(data: PanelData): string {
     const userRows = data.users
         .map(
             u => `<tr><td data-l="Почта">${escapeHtml(u.email)}</td>
-                  <td data-l="Роль">${escapeHtml(u.role)}</td>
                   <td data-l="Кабинеты">${escapeHtml(u.scope)}</td>
+                  <td data-l="Области">${escapeHtml(u.areas)}</td>
                   <td data-l="Последний вход" class="muted">${ts(u.last_seen)}</td></tr>`
         )
         .join('');
@@ -442,10 +442,10 @@ ${queue}
 
 <h2>${data.isAdmin ? 'Кто имеет доступ' : 'Ваш доступ'}</h2>
 <div class="scroll"><table>
-  <thead><tr><th>Почта</th><th>Роль</th><th>Кабинеты</th><th>Последний вход</th></tr></thead>
+  <thead><tr><th>Почта</th><th>Кабинеты</th><th>Что видит</th><th>Последний вход</th></tr></thead>
   <tbody>${userRows || '<tr><td colspan="4" class="muted">Пока никто не подключался</td></tr>'}</tbody>
 </table></div>
-<p class="muted small">Роль <code>reader</code> может только читать: отправка ответов недоступна.${data.isAdmin ? '' : ' Показан только ваш доступ.'}</p>
+<p class="muted small">Доступ складывается из двух осей: <b>кабинеты</b> — где, <b>области</b> — что. Отвечать покупателям может только тот, у кого есть область <code>reply</code>.${data.isAdmin ? '' : ' Показан только ваш доступ.'}</p>
 
 <h2>${data.isAdmin ? 'Последние действия' : 'Ваши последние действия'}</h2>
 <div class="scroll"><table>

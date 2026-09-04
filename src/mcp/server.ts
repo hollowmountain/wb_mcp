@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Actor } from '../auth/provider.js';
-import { canUseNepsell, canUseOnec } from '../config.js';
+import { inArea } from '../auth/provider.js';
+import { gateByAreas } from './gate.js';
 import { registerNepsellTools } from './tools/nepsell.js';
 import { registerOnecTools } from './tools/onec.js';
 import { registerOzonTools } from './tools/ozon.js';
@@ -75,8 +76,8 @@ const ONEC_INSTRUCTIONS = `
 Всегда говорите человеку, из какой системы цифра.`;
 
 export function createMcpServer(actor: Actor): McpServer {
-    const nepsell = canUseNepsell(actor.email);
-    const onec = canUseOnec(actor.email);
+    const nepsell = inArea(actor, 'money');
+    const onec = inArea(actor, 'catalog') || inArea(actor, 'orders');
     const server = new McpServer(
         { name: 'mcp-wb', version: '0.1.0' },
         {
@@ -84,6 +85,10 @@ export function createMcpServer(actor: Actor): McpServer {
             instructions: INSTRUCTIONS + (nepsell ? NEPSELL_INSTRUCTIONS : '') + (onec ? ONEC_INSTRUCTIONS : '')
         }
     );
+
+    // Заслон ставится до регистрации: инструменты вне областей человека даже
+    // не попадут в список, а вызов по устаревшему списку получит отказ.
+    gateByAreas(server, actor);
 
     registerReadTools(server);
     registerWriteTools(server);

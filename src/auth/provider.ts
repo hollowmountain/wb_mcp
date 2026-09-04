@@ -9,7 +9,8 @@ import type {
     OAuthTokens
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 
-import { canSend, config, isAllowedEmail, roleForEmail, type Role } from '../config.js';
+import { areasOf, canSend, config, isAllowedEmail, roleForEmail, type Role } from '../config.js';
+import type { Area } from '../areas.js';
 import { audit } from '../audit.js';
 import { db, hashToken, newId, now } from '../db/index.js';
 import { logger } from '../logger.js';
@@ -121,7 +122,8 @@ interface TokenRow {
 function grantedScopes(email: string, requested: string[]): string[] {
     const role = roleForEmail(email);
     const wanted = requested.length > 0 ? requested : SUPPORTED_SCOPES;
-    return wanted.filter(s => (s === SCOPE_WRITE ? canSend(role) : SUPPORTED_SCOPES.includes(s)));
+    // Право писать теперь выражено областью reply, а не ролью.
+    return wanted.filter(s => (s === SCOPE_WRITE ? areasOf(email, null).includes('reply') : SUPPORTED_SCOPES.includes(s)));
 }
 
 function issueTokens(params: {
@@ -347,12 +349,16 @@ export async function completeAuthorization(
     // Область видимости приходит из способа входа (например, из одноразового кода)
     // и перезаписывает прежнюю: выдали новый код на один кабинет — доступ сузился.
     const scope = verified.cabinets && verified.cabinets.length > 0 ? verified.cabinets.join(',') : null;
+    const areaScope = verified.areas && verified.areas.length > 0 ? verified.areas.join(',') : null;
     db.prepare(
-        `INSERT INTO users (email, name, cabinets, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO users (email, name, cabinets, areas, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(email) DO UPDATE SET last_seen = excluded.last_seen,
                                           name = COALESCE(excluded.name, users.name),
-                                          cabinets = excluded.cabinets`
-    ).run(email, verified.name ?? null, scope, timestamp, timestamp);
+                                          cabinets = excluded.cabinets,
+                                          -- Области из кода перекрывают прежние, но пустое значение
+                                          -- в коде не стирает то, что уже назначили руками.
+                                          areas = COALESCE(excluded.areas, users.areas)`
+    ).run(email, verified.name ?? null, scope, areaScope, timestamp, timestamp);
 
     const code = newId(32);
     db.prepare(
@@ -391,7 +397,20 @@ export interface Actor {
     scopes: string[];
     /** Кабинеты, доступные этому человеку. null — все. */
     cabinets: string[] | null;
+    /** Области данных. Всегда конкретный список, никогда не «все». */
+    areas: Area[];
 }
+
+/** Читаем области из базы на каждом запросе: сужение действует сразу. */
+export function areaScopeOf(email: string): Area[] {
+    const row = db.prepare('SELECT areas FROM users WHERE email = ?').get(email) as
+        | { areas: string | null }
+        | undefined;
+    return areasOf(email, row?.areas);
+}
+
+/** Открыта ли человеку область. Единственная проверка, которой пользуются инструменты. */
+export const inArea = (actor: Actor, area: Area): boolean => actor.areas.includes(area);
 
 /** Читаем область видимости из базы на каждом запросе: сужение действует сразу. */
 export function cabinetScopeOf(email: string): string[] | null {
@@ -410,5 +429,11 @@ export function cabinetScopeOf(email: string): string[] | null {
 export function actorFromAuthInfo(auth: AuthInfo | undefined): Actor {
     const email = typeof auth?.extra?.email === 'string' ? auth.extra.email : undefined;
     if (!email) throw new InvalidTokenError('В токене нет личности пользователя');
-    return { email, role: roleForEmail(email), scopes: auth?.scopes ?? [], cabinets: cabinetScopeOf(email) };
+    return {
+        email,
+        role: roleForEmail(email),
+        scopes: auth?.scopes ?? [],
+        cabinets: cabinetScopeOf(email),
+        areas: areaScopeOf(email)
+    };
 }

@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { audit } from '../../audit.js';
 import { canUseCabinet, allowedCabinets, resolveCabinet } from '../../access.js';
-import { canSend } from '../../config.js';
+import { describeAreas } from '../../areas.js';
 import {
     assertCanSend,
     createDraft,
@@ -316,7 +316,7 @@ export function registerWriteTools(server: McpServer): void {
                 [
                     `Пользователь: ${actor.email}`,
                     `Роль: ${actor.role}`,
-                    `Отправка ответов покупателям: ${canSend(actor.role) ? 'разрешена' : 'запрещена'}`,
+                    `Ваши области: ${describeAreas(actor.areas)}`,
                     `Разрешения токена доступа: ${actor.scopes.join(', ') || 'нет'}`,
                     'Кабинеты Wildberries:',
                     cabinets

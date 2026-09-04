@@ -2,7 +2,8 @@ import { audit } from './audit.js';
 import { db, newId, now } from './db/index.js';
 import type { Actor } from './auth/provider.js';
 import { canUseCabinet } from './access.js';
-import { canSend, config } from './config.js';
+import { config } from './config.js';
+import { inArea } from './auth/provider.js';
 import type { Cabinet } from './wb/cabinets.js';
 import {
     answerFeedback,
@@ -46,7 +47,7 @@ export class DraftError extends Error {}
  * и то, что токен кабинета вообще умеет писать.
  */
 function assertCanSend(cabinet: Cabinet, actor: Actor, action: string, target: string): void {
-    if (!canSend(actor.role)) {
+    if (!inArea(actor, 'reply')) {
         audit({ actor: actor.email, cabinet: cabinet.slug, action, target, outcome: 'denied' });
         throw new DraftError(
             `У вас роль «${actor.role}»: читать данные можно, отправлять ответы клиентам — нет. Обратитесь к администратору.`

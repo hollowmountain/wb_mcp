@@ -137,12 +137,16 @@ export async function completePanelLogin(
 
     const timestamp = now();
     const scope = verified.cabinets && verified.cabinets.length > 0 ? verified.cabinets.join(',') : null;
+    const areaScope = verified.areas && verified.areas.length > 0 ? verified.areas.join(',') : null;
     db.prepare(
-        `INSERT INTO users (email, name, cabinets, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO users (email, name, cabinets, areas, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(email) DO UPDATE SET last_seen = excluded.last_seen,
                                           name = COALESCE(excluded.name, users.name),
-                                          cabinets = excluded.cabinets`
-    ).run(email, verified.name ?? null, scope, timestamp, timestamp);
+                                          cabinets = excluded.cabinets,
+                                          -- Области из кода перекрывают прежние, но пустое значение
+                                          -- в коде не стирает то, что уже назначили руками.
+                                          areas = COALESCE(excluded.areas, users.areas)`
+    ).run(email, verified.name ?? null, scope, areaScope, timestamp, timestamp);
 
     audit({ actor: email, action: 'panel.login', outcome: 'ok' });
     issueCookie(res, email);
