@@ -306,18 +306,22 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 .filter(Boolean)
                 .join(' and ');
 
+            const asked = args.limit ?? 20;
             const rows = await listEntity<Product>(config.onec, 'Catalog_Номенклатура', {
-                top: args.limit ?? 20,
+                top: asked,
                 filter,
                 select: 'Ref_Key,Code,Description,Артикул,DeletionMark,IsFolder',
                 orderby: 'Description'
             });
 
             if (rows.length === 0) return text(s ? `По запросу «${s}» в 1С ничего не найдено.` : 'Номенклатура пуста.');
+            const mayHaveMore = rows.length >= asked;
             const lines = rows.map(
                 (r, i) => `${i + 1}. ${r.Description || dash}\n   код ${r.Code || dash}, артикул ${r.Артикул || dash}`
             );
-            return text(`Найдено: ${rows.length}\n\n${lines.join('\n')}`);
+            return text(
+                `Показано: ${rows.length}${mayHaveMore ? ' (возможно, есть ещё — увеличьте limit)' : ''}\n\n${lines.join('\n')}`
+            );
         })
     );
 
@@ -381,20 +385,26 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             // 1С ждёт дату без часового пояса, в формате ISO.
             const from = `${args.dateFrom.slice(0, 10)}T00:00:00`;
             const to = `${args.dateTo.slice(0, 10)}T23:59:59`;
-            const rows = await listEntity<SalesOrder>(config.onec, 'Document_ЗаказПокупателя', {
-                top: args.limit ?? 30,
+            const asked = args.limit ?? 30;
+            const got = await listEntity<SalesOrder>(config.onec, 'Document_ЗаказПокупателя', {
+                top: asked + 1,
                 filter: `Date ge datetime'${from}' and Date le datetime'${to}' and DeletionMark eq false`,
                 select: 'Ref_Key,Number,Date,Posted,DeletionMark,СуммаДокумента,Контрагент_Key',
                 orderby: 'Date desc'
             });
 
+            const cut = got.length > asked;
+            const rows = cut ? got.slice(0, asked) : got;
             if (rows.length === 0) return text(`Заказов за ${args.dateFrom} — ${args.dateTo} не найдено.`);
             const total = rows.reduce((s, r) => s + (r.СуммаДокумента ?? 0), 0);
             const lines = rows.map(
                 (r, i) =>
                     `${i + 1}. № ${r.Number || dash} от ${day(r.Date)} ${dash} ${money(r.СуммаДокумента)}${r.Posted ? '' : ' (не проведён)'}`
             );
-            return text(`Заказов: ${rows.length}, на сумму ${money(total)}\n\n${lines.join('\n')}`);
+            const head = cut
+                ? `Показано заказов: ${rows.length}, но за период их больше. Сумма ${money(total)} — только по показанным.`
+                : `Заказов: ${rows.length}, на сумму ${money(total)}`;
+            return text(`${head}\n\n${lines.join('\n')}`);
         })
     );
 
@@ -697,11 +707,14 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             }
             const from = args.dateFrom.slice(0, 10);
             const to = args.dateTo.slice(0, 10);
-            const rows = await listEntity<DocRow>(config.onec, 'Document_ПриходнаяНакладная', {
-                top: args.limit ?? 20,
+            const asked = args.limit ?? 20;
+            const got = await listEntity<DocRow>(config.onec, 'Document_ПриходнаяНакладная', {
+                top: asked + 1,
                 filter: `Date ge datetime'${from}T00:00:00' and Date le datetime'${to}T23:59:59' and DeletionMark eq false and Posted eq true`,
                 orderby: 'Date desc'
             });
+            const cut = got.length > asked;
+            const rows = cut ? got.slice(0, asked) : got;
             if (rows.length === 0) return text(`Проведённых приходных накладных за ${from} — ${to} нет.`);
 
             const partners = await resolveNames(
@@ -742,9 +755,11 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             }
             if (blocks.length === 0) return text(`По запросу «${args.search}» поступлений не найдено.`);
             const total = rows.reduce((s, r) => s + (r.СуммаДокумента ?? 0), 0);
-            return text(
-                `Накладных: ${shown}${needle ? '' : `, на сумму ${money(total)}`}\n\n${blocks.join('\n\n')}`
-            );
+            const head = cut
+                ? `Показано накладных: ${shown}, но за период их больше` +
+                  (needle ? '.' : `. Сумма ${money(total)} — только по показанным.`)
+                : `Накладных: ${shown}${needle ? '' : `, на сумму ${money(total)}`}`;
+            return text(`${head}\n\n${blocks.join('\n\n')}`);
         })
     );
 
