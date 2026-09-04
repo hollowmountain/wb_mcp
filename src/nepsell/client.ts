@@ -86,10 +86,21 @@ export const listNepsellClients = (token: string): Promise<{ data: NepsellClient
 export interface MetricRow {
     period_start: string;
     period_end: string;
-    nm_id: string;
+    /** Wildberries опознаёт товар так. */
+    nm_id?: string;
+    /** А Ozon — так, и это массив. Одно из двух полей всегда пустое. */
+    skus?: string[];
     metric_name: string;
     metric_value: number;
 }
+
+/**
+ * Чем Nepsell опознал товар. У Wildberries это nm_id, у Ozon — skus[0].
+ * Без этой развилки все строки Ozon сливаются в одну кучу с ключом undefined,
+ * итоги остаются верными, а разбивка по товарам пропадает.
+ */
+export const itemIdOf = (row: { nm_id?: string; skus?: string[] }): string =>
+    row.nm_id ?? row.skus?.[0] ?? '';
 
 export const getFinances = (
     token: string,
@@ -110,9 +121,12 @@ export interface AdCampaign {
     campaign_name: string;
     campaign_type: string;
     strategy: string | null;
-    nm_ids: string[];
-    /** Товары, которые кампания тянет за собой: основа для assoc_orders. */
-    assoc_nm_ids: string[];
+    /** Wildberries. */
+    nm_ids?: string[];
+    /** Товары, которые кампания тянет за собой: основа для assoc_orders. Только Wildberries. */
+    assoc_nm_ids?: string[];
+    /** Ozon перечисляет товары кампании здесь и связанных не различает. */
+    skus?: string[];
 }
 
 export interface AdMetricRow {

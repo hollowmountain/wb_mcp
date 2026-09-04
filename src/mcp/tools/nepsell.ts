@@ -13,6 +13,9 @@ const pct = (v: number | null): string => (v === null ? '—' : `${v}%`);
 
 const dateArg = (what: string) => z.string().describe(`${what}, ISO-дата: 2026-08-01`);
 
+/** На Wildberries товар зовут nmID, на Ozon — SKU. */
+const idLabel = (market: string): string => (market === 'wb' ? 'nmID' : 'SKU');
+
 const marketArg = z
     .enum(['wb', 'ozon'])
     .optional()
@@ -131,14 +134,14 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
                         lines.push(`Самые прибыльные (из ${items.length} товаров):`);
                         for (const [i, it] of items.slice(0, top).entries()) {
                             lines.push(
-                                `  ${i + 1}. nmID ${it.nmId} — прибыль ${money(it.profit)}, выручка ${money(it.revenue)}, себестоимость ${money(it.cost)}, маржа ${pct(it.marginPercent)}, продаж ${it.salesCount}`
+                                `  ${i + 1}. ${idLabel(market)} ${it.nmId} — прибыль ${money(it.profit)}, выручка ${money(it.revenue)}, себестоимость ${money(it.cost)}, маржа ${pct(it.marginPercent)}, продаж ${it.salesCount}`
                             );
                         }
                         const losing = items.filter(i => i.profit < 0);
                         if (losing.length > 0) {
                             lines.push('', `Убыточные (${losing.length}):`);
                             for (const it of losing.slice(0, top)) {
-                                lines.push(`  nmID ${it.nmId} — убыток ${money(it.profit)}, продаж ${it.salesCount}`);
+                                lines.push(`  ${idLabel(market)} ${it.nmId} — убыток ${money(it.profit)}, продаж ${it.salesCount}`);
                             }
                         }
                     }

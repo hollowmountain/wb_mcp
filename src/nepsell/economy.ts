@@ -5,6 +5,7 @@
  * шесть с лишним тысяч строк. Отдавать такое модели нельзя — она захлебнётся,
  * а человек получит кашу вместо ответа.
  */
+import { itemIdOf } from './client.js';
 import type { AdMetricRow, MetricRow, NepsellClient } from './client.js';
 
 /** Метрики, которые складываются по товарам. */
@@ -82,9 +83,10 @@ export function summariseFinances(rows: MetricRow[]): EconomyReport {
         const v = typeof r.metric_value === 'number' ? r.metric_value : 0;
         sums.set(r.metric_name, (sums.get(r.metric_name) ?? 0) + v);
 
-        const item = perItem.get(r.nm_id) ?? new Map<string, number>();
+        const key = itemIdOf(r);
+        const item = perItem.get(key) ?? new Map<string, number>();
         item.set(r.metric_name, (item.get(r.metric_name) ?? 0) + v);
-        perItem.set(r.nm_id, item);
+        perItem.set(key, item);
     }
 
     const g = (name: string): number => Number((sums.get(name) ?? 0).toFixed(2));
@@ -201,7 +203,14 @@ function adTotalsFrom(m: Map<string, number>): AdTotals {
 
 export function summariseAds(
     metrics: AdMetricRow[],
-    campaigns: Array<{ campaign_id: string; campaign_name: string; campaign_type: string; nm_ids: string[]; assoc_nm_ids: string[] }>
+    campaigns: Array<{
+        campaign_id: string;
+        campaign_name: string;
+        campaign_type: string;
+        nm_ids?: string[];
+        assoc_nm_ids?: string[];
+        skus?: string[];
+    }>
 ): { totals: AdTotals; campaigns: CampaignEconomy[] } {
     const all = new Map<string, number>();
     const per = new Map<string, Map<string, number>>();
@@ -223,7 +232,7 @@ export function summariseAds(
                 campaignId,
                 name: info?.campaign_name ?? campaignId,
                 type: info?.campaign_type ?? '',
-                nmIds: info?.nm_ids ?? [],
+                nmIds: info?.nm_ids ?? info?.skus ?? [],
                 assocNmIds: info?.assoc_nm_ids ?? [],
                 ...adTotalsFrom(m)
             };
