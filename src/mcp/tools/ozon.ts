@@ -7,6 +7,7 @@ import {
     getOzonAnalytics,
     getOzonFinanceTotals,
     getAllOzonPrices,
+    getOzonChatHistory,
     getAllOzonStocks,
     getOzonWarehouseStocks,
     listFboPostings,
@@ -437,6 +438,62 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                     '',
                     `К перечислению: ${money(f.net)} — это ${share}% от начисленного`
                 ].join('\n');
+            })
+        )
+    );
+
+    server.registerTool(
+        'ozon_chat_history',
+        {
+            title: 'Ozon: переписка в чате',
+            description:
+                'Что писали в конкретном чате: сообщения покупателя, наши ответы и служебные уведомления Ozon — раздельно. ' +
+                'Номер чата берётся из ozon_chats. Отвечать через коннектор пока нельзя: ключ выпущен только на чтение.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                chatId: z.string().describe('Номер чата из ozon_chats'),
+                limit: z.number().int().min(1).max(200).optional().describe('Сколько сообщений, по умолчанию 30'),
+                withNotifications: z
+                    .boolean()
+                    .optional()
+                    .describe('Показать и служебные уведомления Ozon. По умолчанию только живая переписка.')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('ozon_chat_history', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
+                const all = await getOzonChatHistory(cabinet, args.chatId, args.limit ?? 30);
+                if (all.length === 0) return 'В этом чате сообщений нет.';
+
+                // Служебные рассылки Ozon идут тем же потоком, что и письма
+                // покупателей. Если их не отделить, вопрос человека утонет
+                // среди «заберите возвраты из точки выдачи».
+                const isService = (m: { author: string }): boolean => /Notification|System/i.test(m.author);
+                const talk = all.filter(m => !isService(m));
+                const service = all.filter(isService);
+                const shown = args.withNotifications ? all : talk;
+
+                if (shown.length === 0) {
+                    return (
+                        `Живой переписки в этом чате нет: все ${all.length} сообщений — служебные ` +
+                        `уведомления Ozon. Чтобы посмотреть их, вызовите ещё раз с withNotifications.`
+                    );
+                }
+
+                const name = (author: string): string =>
+                    /Seller/i.test(author) ? 'мы' : /Customer|Buyer/i.test(author) ? 'покупатель' : author;
+
+                const lines = shown.map(m => {
+                    const body = m.isImage && !m.text ? '(изображение)' : m.text.replace(/\s+/g, ' ').slice(0, 400);
+                    return `[${name(m.author)}] ${m.createdAt.slice(0, 16).replace('T', ' ')}${m.isRead ? '' : ' • не прочитано'}\n   ${body}`;
+                });
+
+                const head =
+                    `Сообщений: ${shown.length}` +
+                    (!args.withNotifications && service.length > 0
+                        ? ` (плюс ${service.length} служебных уведомлений Ozon — скрыты)`
+                        : '');
+                return `${head}\n\n${lines.join('\n')}`;
             })
         )
     );

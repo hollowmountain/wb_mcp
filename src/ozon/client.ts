@@ -443,3 +443,55 @@ export async function getAllOzonPrices(cabinet: OzonCabinet): Promise<OzonPriceR
     }
     return out;
 }
+
+
+export interface OzonChatMessage {
+    messageId: string;
+    /** Кто написал: покупатель, продавец или служебное уведомление Ozon. */
+    author: string;
+    createdAt: string;
+    isRead: boolean;
+    isImage: boolean;
+    text: string;
+}
+
+/**
+ * Переписка внутри одного чата.
+ *
+ * Отзывы Ozon закрыты подпиской, а вот чаты — нет: и список, и история
+ * читаются обычным ключом. Это единственный канал общения с покупателем,
+ * доступный без доплаты.
+ *
+ * Осторожно с содержимым: в чатах вперемешку идут сообщения покупателей
+ * и служебные уведомления самого Ozon («заберите возвраты из точки выдачи»).
+ * Их различает тип автора, и смешивать их в одну ленту нельзя — человек
+ * будет искать вопрос покупателя среди рассылки.
+ */
+export async function getOzonChatHistory(
+    cabinet: OzonCabinet,
+    chatId: string,
+    limit = 30
+): Promise<OzonChatMessage[]> {
+    const raw = await post<{
+        messages?: Array<{
+            message_id?: string | number;
+            user?: { type?: string };
+            created_at?: string;
+            is_read?: boolean;
+            is_image?: boolean;
+            data?: string[];
+        }>;
+    }>(cabinet, '/v3/chat/history', {
+        chat_id: chatId,
+        limit: Math.min(limit, 1000),
+        direction: 'Backward'
+    });
+    return (raw.messages ?? []).map(m => ({
+        messageId: String(m.message_id ?? ''),
+        author: m.user?.type ?? 'Unknown',
+        createdAt: m.created_at ?? '',
+        isRead: m.is_read === true,
+        isImage: m.is_image === true,
+        text: (m.data ?? []).join(' ').trim()
+    }));
+}

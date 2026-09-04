@@ -35,6 +35,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     wb_chats_list: 'inbox',
     wb_chat_events: 'inbox',
     ozon_chats: 'inbox',
+    ozon_chat_history: 'inbox',
 
     // черновик — часть работы с обращением, поэтому inbox;
     // отправка и изменение состояния у WB — уже reply
