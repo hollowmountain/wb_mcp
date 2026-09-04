@@ -91,6 +91,7 @@ interface DocItem {
     Количество?: number;
     Цена?: number;
     Сумма?: number;
+    СуммаНДС?: number;
 }
 
 const itemsOf = (doc: DocRow): DocItem[] => {
@@ -211,11 +212,16 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 'onec_production  Заказы на производство: что и сколько запущено в работу.',
                 'onec_warehouse   Движения склада: перемещения, списания, оприходования,',
                 '                 инвентаризации за период.',
+                'onec_receipts    Приходные накладные с ценами: что и почём поступило.',
+                'onec_piecework   Сдельные наряды: кто из работников что сделал и на сколько.',
                 'onec_reference   Эта справка.',
                 '',
                 '── ЧЕГО В БАЗЕ НЕТ ──',
                 '',
-                'Зарплаты и кадровых данных нет: соответствующие документы пусты.',
+                'Начисления зарплаты не ведутся — документ пуст. Но сдельные наряды есть,',
+                'и в них видно, кто сколько заработал за день (onec_piecework).',
+                'Партионный учёт не ведётся, поэтому готовой себестоимости остатков в базе нет:',
+                'её собирают из приходных накладных с ценами (onec_receipts).',
                 'Отзывов, вопросов и переписки с покупателями в 1С нет — это площадки,',
                 'смотрите инструменты wb_* и ozon_*.',
                 'Себестоимости в разрезе товара маркетплейса тут тоже нет — она в nep_economy.',
@@ -511,6 +517,186 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 withItems: args.withItems === true,
                 empty: `Документов «${args.kind}» за этот период нет.`
             });
+        })
+    );
+
+    server.registerTool(
+        'onec_piecework',
+        {
+            title: '1С: сдельные наряды',
+            description:
+                'Сдельные наряды за период: кто из работников что сделал и на какую сумму. ' +
+                'По умолчанию за сегодня. Внизу — свод по исполнителям.',
+            inputSchema: {
+                dateFrom: z.string().optional().describe('Начало периода, ISO-дата. Не указано — сегодня.'),
+                dateTo: z.string().optional().describe('Конец периода, ISO-дата. Не указано — то же, что начало.'),
+                executor: z.string().optional().describe('Часть фамилии исполнителя'),
+                withOperations: z.boolean().optional().describe('Показать операции внутри нарядов'),
+                limit: z.number().int().min(1).max(300).optional().describe('Сколько нарядов показать, по умолчанию 50')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_piecework', async (args, extra) => {
+            const actor = actorOf(extra);
+            if (!onecReady() || !inArea(actor, 'payroll')) {
+                return fail('Область «сдельная оплата труда» вам не открыта. Обратитесь к администратору.');
+            }
+            const today = new Date().toISOString().slice(0, 10);
+            const from = (args.dateFrom ?? today).slice(0, 10);
+            const to = (args.dateTo ?? args.dateFrom ?? today).slice(0, 10);
+
+            const rows = await listEntity<DocRow & { Исполнитель?: string; Закрыт?: boolean }>(
+                config.onec,
+                'Document_СдельныйНаряд',
+                {
+                    top: args.limit ?? 50,
+                    filter: `Date ge datetime'${from}T00:00:00' and Date le datetime'${to}T23:59:59' and DeletionMark eq false`,
+                    orderby: 'Date desc'
+                }
+            );
+            if (rows.length === 0) return text(`Сдельных нарядов за ${from}${to === from ? '' : ` — ${to}`} нет.`);
+
+            const people = await resolveNames(
+                config.onec,
+                'Catalog_Сотрудники',
+                rows.map(r => String(r.Исполнитель ?? ''))
+            );
+            const needle = args.executor?.trim().toLowerCase();
+            const wanted = needle
+                ? rows.filter(r => (people.get(String(r.Исполнитель ?? '')) ?? '').toLowerCase().includes(needle))
+                : rows;
+            if (wanted.length === 0) return text(`Нарядов по запросу «${args.executor}» нет.`);
+
+            const products = args.withOperations
+                ? await resolveNames(
+                      config.onec,
+                      'Catalog_Номенклатура',
+                      wanted.flatMap(r => (Array.isArray(r.Операции) ? (r.Операции as DocItem[]) : []).map(o => String(o.Номенклатура_Key ?? '')))
+                  )
+                : new Map<string, string>();
+
+            const byPerson = new Map<string, { sum: number; count: number }>();
+            for (const r of wanted) {
+                const who = people.get(String(r.Исполнитель ?? '')) || '(без исполнителя)';
+                const acc = byPerson.get(who) ?? { sum: 0, count: 0 };
+                acc.sum += r.СуммаДокумента ?? 0;
+                acc.count += 1;
+                byPerson.set(who, acc);
+            }
+            const total = wanted.reduce((s, r) => s + (r.СуммаДокумента ?? 0), 0);
+            const notPosted = wanted.filter(r => r.Posted === false).length;
+
+            const svod = [...byPerson.entries()]
+                .sort((a, b) => b[1].sum - a[1].sum)
+                .map(([who, v]) => `   ${who} ${dash} ${money(v.sum)} (нарядов: ${v.count})`);
+
+            const list = wanted.map(r => {
+                const who = people.get(String(r.Исполнитель ?? '')) || '(без исполнителя)';
+                const head =
+                    `№ ${r.Number || dash} от ${day(r.Date)} ${dash} ${who} ${dash} ${money(r.СуммаДокумента)}` +
+                    (r.Posted === false ? ' (не проведён)' : '') +
+                    (r.Закрыт === false ? ' (не закрыт)' : '');
+                if (!args.withOperations) return head;
+                const ops = Array.isArray(r.Операции) ? (r.Операции as DocItem[]) : [];
+                if (ops.length === 0) return `${head}\n   операций нет`;
+                return (
+                    head +
+                    '\n' +
+                    ops
+                        .slice(0, 20)
+                        .map(o => {
+                            const name = products.get(String(o.Номенклатура_Key ?? '')) || '(без названия)';
+                            const qty = typeof o.Количество === 'number' ? o.Количество.toLocaleString('ru-RU') : dash;
+                            return `   ${name} ${dash} ${qty}${o.Сумма ? ` на ${money(o.Сумма)}` : ''}`;
+                        })
+                        .join('\n')
+                );
+            });
+
+            return text(
+                [
+                    `${from}${to === from ? '' : ` — ${to}`}: нарядов ${wanted.length}, на сумму ${money(total)}` +
+                        (notPosted > 0 ? `, из них не проведено ${notPosted}` : ''),
+                    '',
+                    'По исполнителям:',
+                    ...svod,
+                    '',
+                    ...list
+                ].join('\n')
+            );
+        })
+    );
+
+    server.registerTool(
+        'onec_receipts',
+        {
+            title: '1С: приходные накладные с ценами',
+            description:
+                'Что и почём поступило на склад за период: поставщик, номенклатура, количество, цена и сумма по строкам. ' +
+                'Партионный учёт в базе не ведётся, поэтому денежную оценку запасов собирают именно отсюда.',
+            inputSchema: {
+                dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
+                dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
+                search: z.string().optional().describe('Часть названия номенклатуры'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько накладных показать, по умолчанию 20')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_receipts', async (args, extra) => {
+            const actor = actorOf(extra);
+            if (!onecReady() || !inArea(actor, 'supply')) {
+                return fail('Область «поставщики и закупочные цены» вам не открыта. Обратитесь к администратору.');
+            }
+            const from = args.dateFrom.slice(0, 10);
+            const to = args.dateTo.slice(0, 10);
+            const rows = await listEntity<DocRow>(config.onec, 'Document_ПриходнаяНакладная', {
+                top: args.limit ?? 20,
+                filter: `Date ge datetime'${from}T00:00:00' and Date le datetime'${to}T23:59:59' and DeletionMark eq false and Posted eq true`,
+                orderby: 'Date desc'
+            });
+            if (rows.length === 0) return text(`Проведённых приходных накладных за ${from} — ${to} нет.`);
+
+            const partners = await resolveNames(
+                config.onec,
+                'Catalog_Контрагенты',
+                rows.map(r => String(r.Контрагент_Key ?? ''))
+            );
+            const products = await resolveNames(
+                config.onec,
+                'Catalog_Номенклатура',
+                rows.flatMap(r => itemsOf(r).map(i => String(i.Номенклатура_Key ?? '')))
+            );
+            const needle = args.search?.trim().toLowerCase();
+
+            const blocks: string[] = [];
+            let shown = 0;
+            for (const r of rows) {
+                const items = itemsOf(r).filter(i => {
+                    if (!needle) return true;
+                    const n = products.get(String(i.Номенклатура_Key ?? '')) ?? '';
+                    return n.toLowerCase().includes(needle);
+                });
+                if (needle && items.length === 0) continue;
+                shown += 1;
+                const who = partners.get(String(r.Контрагент_Key ?? ''));
+                const head =
+                    `№ ${r.Number || dash} от ${day(r.Date)}` +
+                    (who ? ` ${dash} ${who}` : '') +
+                    ` ${dash} ${money(r.СуммаДокумента)}`;
+                const lines = items.slice(0, 20).map(i => {
+                    const name = products.get(String(i.Номенклатура_Key ?? '')) || '(без названия)';
+                    const qty = typeof i.Количество === 'number' ? i.Количество.toLocaleString('ru-RU') : dash;
+                    const price = typeof i.Цена === 'number' ? `${money(i.Цена)} за ед.` : dash;
+                    return `   ${name} ${dash} ${qty} × ${price} = ${money(i.Сумма)}`;
+                });
+                const more = items.length > 20 ? `\n   и ещё ${items.length - 20} строк` : '';
+                blocks.push(`${head}\n${lines.join('\n')}${more}`);
+            }
+            if (blocks.length === 0) return text(`По запросу «${args.search}» поступлений не найдено.`);
+            const total = rows.reduce((s, r) => s + (r.СуммаДокумента ?? 0), 0);
+            return text(
+                `Накладных: ${shown}${needle ? '' : `, на сумму ${money(total)}`}\n\n${blocks.join('\n\n')}`
+            );
         })
     );
 }

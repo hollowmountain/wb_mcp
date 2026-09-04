@@ -9,7 +9,7 @@
  * Список намеренно короткий. Каждая область должна отвечать чьей-то настоящей
  * работе, иначе она превращается в галочку, которую ставят не думая.
  */
-export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'erp', 'supply', 'money'] as const;
+export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'erp', 'supply', 'payroll', 'money'] as const;
 
 export type Area = (typeof AREAS)[number];
 
@@ -21,6 +21,7 @@ export const AREA_LABELS: Record<Area, string> = {
     orders: 'заказы и возвраты на площадках',
     erp: 'учётная система 1С',
     supply: 'поставщики и закупочные цены',
+    payroll: 'сдельная оплата труда',
     money: 'себестоимость, прибыль, реклама'
 };
 
@@ -34,6 +35,9 @@ export const AREA_NOTES: Partial<Record<Area, string>> = {
     supply:
         'Отделена от erp: по закупочным ценам и списку поставщиков читается вся структура наценки. ' +
         'Складскому работнику это не нужно, а унести с собой легко.',
+    payroll:
+        'Сдельные наряды показывают, кто из работников сколько заработал за день. ' +
+        'Это персональные данные о доходе, поэтому область отдельная и по умолчанию закрыта.',
     money: 'Самая чувствительная. Не выдаётся по умолчанию — только явно.'
 };
 
@@ -76,7 +80,7 @@ export const PROFILES: Record<string, { label: string; areas: readonly Area[]; a
     },
     finance: {
         label: 'Финансы',
-        areas: ['money', 'orders', 'erp', 'supply', 'catalog'],
+        areas: ['money', 'orders', 'erp', 'supply', 'payroll', 'catalog'],
         about: 'Себестоимость, прибыль, окупаемость рекламы. Переписки с покупателями не видит.'
     },
     owner: {
