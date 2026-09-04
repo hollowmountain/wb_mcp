@@ -238,6 +238,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 '                 инвентаризации за период.',
                 'onec_stock_value Запасы в деньгах: учётная себестоимость по складам.',
                 'onec_specification Из чего сделана продукция: состав материалов и операции.',
+                'onec_shipments   Расходные накладные: что и кому отгружено, с ценами.',
                 'onec_receipts    Приходные накладные с ценами: что и почём поступило.',
                 'onec_piecework   Сдельные наряды: кто из работников что сделал и на сколько.',
                 'onec_reference   Эта справка.',
@@ -850,6 +851,36 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
     );
 
     server.registerTool(
+        'onec_shipments',
+        {
+            title: '1С: расходные накладные',
+            description:
+                'Что и кому отгружено за период: покупатель, номенклатура, количество, цена и сумма по строкам. ' +
+                'Это учётные отгрузки предприятия, не заказы маркетплейса.',
+            inputSchema: {
+                dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
+                dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
+                withItems: z.boolean().optional().describe('Показать состав отгрузок'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько показать, по умолчанию 20')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_shipments', async (args, extra) => {
+            const denied = denyUnless(actorOf(extra), 'orders');
+            if (denied) return fail(denied);
+            return renderDocuments({
+                entity: 'Document_РасходнаяНакладная',
+                dateFrom: args.dateFrom,
+                dateTo: args.dateTo,
+                limit: args.limit ?? 20,
+                withItems: args.withItems === true,
+                partnerField: 'Контрагент_Key',
+                empty: 'Расходных накладных за этот период нет.'
+            });
+        })
+    );
+
+    server.registerTool(
         'onec_specification',
         {
             title: '1С: спецификации продукции',
@@ -879,6 +910,12 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     Количество?: number;
                     КоличествоПродукции?: number;
                 }>;
+                Операции?: Array<{
+                    Операция_Key?: string;
+                    Количество?: number;
+                    НормаВремени?: number;
+                    Описание?: string;
+                }>;
             }>(config.onec, 'Catalog_Спецификации', {
                 top: needle ? 200 : (args.limit ?? 10),
                 filter: 'DeletionMark eq false',
@@ -898,7 +935,8 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 'Catalog_Номенклатура',
                 wanted.flatMap(s => [
                     String(s.Owner_Key ?? ''),
-                    ...(s.Состав ?? []).map(i => String(i.Номенклатура_Key ?? ''))
+                    ...(s.Состав ?? []).map(i => String(i.Номенклатура_Key ?? '')),
+                    ...(args.withOperations ? (s.Операции ?? []).map(o => String(o.Операция_Key ?? '')) : [])
                 ])
             );
 
@@ -918,7 +956,20 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     return `   ${what}${kind} ${dash} ${qty}${per}`;
                 });
                 const more = (s.Состав ?? []).length > 30 ? `\n   и ещё ${(s.Состав ?? []).length - 30} строк` : '';
-                return rows.length > 0 ? `${head}\n${rows.join('\n')}${more}` : `${head}\n   состав пуст`;
+                const body = rows.length > 0 ? `${head}\n${rows.join('\n')}${more}` : `${head}\n   состав пуст`;
+                if (!args.withOperations) return body;
+                const ops = s.Операции ?? [];
+                if (ops.length === 0) return `${body}\n   операций не задано`;
+                const opLines = ops.slice(0, 20).map(o => {
+                    const what = names.get(String(o.Операция_Key ?? '')) || o.Описание || '(операция не указана)';
+                    const qty = typeof o.Количество === 'number' ? ` ${dash} ${o.Количество.toLocaleString('ru-RU')}` : '';
+                    const norm =
+                        typeof o.НормаВремени === 'number' && o.НормаВремени !== 0
+                            ? `, норма времени ${o.НормаВремени.toLocaleString('ru-RU')}`
+                            : '';
+                    return `   ${what}${qty}${norm}`;
+                });
+                return `${body}\n   ── операции ──\n${opLines.join('\n')}`;
             });
 
             return text(`Спецификаций: ${wanted.length}\n\n${blocks.join('\n\n')}`);

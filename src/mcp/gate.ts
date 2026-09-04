@@ -74,6 +74,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     onec_receipts: 'supply',
     onec_piecework: 'payroll',
     onec_specification: 'erp',
+    onec_shipments: 'erp',
     onec_production: 'erp',
     onec_warehouse: 'erp',
 
