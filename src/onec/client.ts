@@ -236,7 +236,13 @@ export async function resolveNames(
             const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity, {
                 top: PAGE,
                 skip,
-                select: 'Ref_Key,Description'
+                select: 'Ref_Key,Description',
+                // Сортировка обязательна. Без неё 1С не гарантирует порядок строк
+                // между запросами, и страницы перекрываются: шесть страниц по
+                // тысяче дали 1915 разных записей из 5216, остальное — повторы.
+                // Названия у большинства товаров тогда не находились, и остатки
+                // схлопывались в одну безымянную кучу.
+                orderby: 'Ref_Key'
             });
             for (const r of rows) fresh.set(r.Ref_Key, r.Description ?? '');
             if (rows.length < PAGE) break;
