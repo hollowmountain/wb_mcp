@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Actor } from '../auth/provider.js';
 import { inArea } from '../auth/provider.js';
 import { gateByAreas } from './gate.js';
+import { registerMediaTools } from './tools/media.js';
 import { registerNepsellTools } from './tools/nepsell.js';
 import { registerOnecTools } from './tools/onec.js';
 import { registerOzonTools } from './tools/ozon.js';
@@ -96,6 +97,7 @@ export function createMcpServer(actor: Actor): McpServer {
     registerNepsellTools(server, actor);
     registerOnecTools(server, actor);
     registerOzonTools(server, actor);
+    registerMediaTools(server, actor);
 
     return server;
 }

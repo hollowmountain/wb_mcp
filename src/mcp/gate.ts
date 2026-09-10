@@ -92,7 +92,9 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     nep_ads: 'money',
     // Реклама Ozon — своя область: расход и ДРР нужны менеджеру площадки,
     // а себестоимость и прибыль ему не нужны.
-    ozon_ads: 'ads'
+    ozon_ads: 'ads',
+    media_generate: 'media',
+    media_result: 'media'
 };
 
 type Handler = (args: never, extra: never) => Promise<unknown>;

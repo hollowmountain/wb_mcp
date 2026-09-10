@@ -178,6 +178,14 @@ export const config = {
     ozon: buildOzonCabinets(),
     /** Пустой токен — Nepsell выключен, инструменты не появляются ни у кого. */
     nepsell: { token: env.NEPSELL_TOKEN },
+    /**
+     * Генерация картинок и видео. Ключ выдаётся парой; нет пары — раздела
+     * нет вовсе, как у Nepsell и 1С.
+     */
+    higgsfield: {
+        keyId: (process.env.HIGGSFIELD_KEY_ID ?? '').trim(),
+        keySecret: (process.env.HIGGSFIELD_KEY_SECRET ?? '').trim()
+    },
     /** Пустой адрес — 1С выключена. */
     onec: {
         baseUrl: env.ONEC_BASE_URL.replace(/\/+$/, ''),
