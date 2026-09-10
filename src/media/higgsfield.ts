@@ -169,7 +169,7 @@ export interface ModelInfo {
     needsImage: boolean;
 }
 
-export type ModelKey = 'photo' | 'video_fast' | 'video';
+export type ModelKey = 'photo' | 'scene' | 'video_fast' | 'video';
 
 export const MODELS: Record<ModelKey, ModelInfo> = {
     photo: {
@@ -178,6 +178,17 @@ export const MODELS: Record<ModelKey, ModelInfo> = {
         label: 'Картинка по описанию',
         credits: 0.05,
         needsImage: false
+    },
+    scene: {
+        // Проверено 10.09.2026 на живом товаре: popcorn принимает готовые
+        // картинки, а soul/reference лишь берёт их как образец стиля и
+        // перерисовывает всё заново. При одной цене popcorn сохраняет форму
+        // упаковки и крупные надписи, soul/reference — нет.
+        path: 'higgsfield-ai/popcorn/auto',
+        kind: 'image',
+        label: 'Товар в новой сцене, по готовому фото',
+        credits: 1.47,
+        needsImage: true
     },
     video_fast: {
         path: 'minimax/hailuo-2.3-fast/standard/image-to-video',

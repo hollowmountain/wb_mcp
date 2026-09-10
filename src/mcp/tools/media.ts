@@ -28,7 +28,14 @@ const explain = (e: unknown): string =>
 function paramsOf(plan: Pick<Plan, 'what' | 'prompt' | 'imageUrl' | 'seconds'>): Record<string, unknown> {
     const model = MODELS[plan.what];
     const p: Record<string, unknown> = { prompt: plan.prompt };
-    if (plan.imageUrl) p[model.kind === 'image' ? 'image_reference_url' : 'image_url'] = plan.imageUrl;
+    if (plan.imageUrl) {
+        // Каждая модель называет вход по-своему: popcorn ждёт массив
+        // image_urls, видео — одиночный image_url. Промахнуться легко,
+        // а ошибка вылезет уже после списания.
+        if (plan.what === 'scene') p.image_urls = [plan.imageUrl];
+        else p.image_url = plan.imageUrl;
+    }
+    if (plan.what === 'scene') p.num_images = 1;
     if (model.kind === 'video') p.duration = plan.seconds ?? 6;
     return p;
 }
@@ -46,9 +53,11 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                 'Промт составляете вы, по-английски и подробно: что за предмет, что в кадре, свет, объектив, чего быть не должно.',
             inputSchema: {
                 what: z
-                    .enum(['photo', 'video_fast', 'video'])
+                    .enum(['photo', 'scene', 'video_fast', 'video'])
                     .describe(
-                        'photo — картинка (~0,003 $); video_fast — ролик подешевле (~0,19 $); video — ролик поплавнее (~0,21 $)'
+                        'photo — картинка с нуля по описанию (~0,003 $), товар выдумает; ' +
+                            'scene — ваш товар с готового фото в новой обстановке (~0,09 $), это основной выбор для съёмки; ' +
+                            'video_fast — ролик из фото подешевле (~0,19 $); video — ролик поплавнее (~0,21 $)'
                     ),
                 prompt: z.string().min(20).describe('Готовый промт по-английски. Короткий промт даёт случайный результат.'),
                 imageUrl: z
