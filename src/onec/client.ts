@@ -55,6 +55,15 @@ export const ALLOWED_ENTITIES = [
     'Document_СписаниеЗапасов',
     'Document_ОприходованиеЗапасов',
     'Document_ИнвентаризацияЗапасов',
+    // Движение денег. Касса и расчётный счёт — четыре отдельных документа,
+    // единого «журнала платежей» в базе нет.
+    'Document_ПоступлениеВКассу',
+    'Document_ПоступлениеНаСчет',
+    'Document_РасходИзКассы',
+    'Document_РасходСоСчета',
+    // Статья ДДС — единственная аналитика, по которой видно, за что платили.
+    // Без неё в отчёте остаются суммы без смысла.
+    'Catalog_СтатьиДвиженияДенежныхСредств',
     // Регистры
     'AccumulationRegister_ЗапасыНаСкладах',
     // Виртуальная таблица остатков: сами движения бесполезны без свёртки,
@@ -405,4 +414,88 @@ export async function getOnecStockValue(cfg: OnecConfig): Promise<OnecStockValue
             sumNoVat: num(r.СуммаБезНДСBalance)
         };
     });
+}
+
+
+// ─── Движение денежных средств ───────────────────────────────────────────────
+
+/** Одна из четырёх касс/счетов, откуда или куда ушли деньги. */
+export type CashKind = 'касса' | 'счёт';
+
+export interface CashFlowRow {
+    kind: CashKind;
+    /** Приход или расход. */
+    incoming: boolean;
+    number: string;
+    date: string;
+    sum: number;
+    /** Вид операции из 1С: «ОтПокупателя», «Поставщику» и подобное. */
+    operation: string;
+    partner: string;
+    /** Статья движения денежных средств — за что платили. */
+    article: string;
+    purpose: string;
+}
+
+const CASH_SOURCES = [
+    { entity: 'Document_ПоступлениеВКассу', kind: 'касса', incoming: true },
+    { entity: 'Document_РасходИзКассы', kind: 'касса', incoming: false },
+    { entity: 'Document_ПоступлениеНаСчет', kind: 'счёт', incoming: true },
+    { entity: 'Document_РасходСоСчета', kind: 'счёт', incoming: false }
+] as const;
+
+/**
+ * Платежи за период по кассе и расчётному счёту.
+ *
+ * Единого журнала платежей в базе нет: приход и расход, касса и счёт — четыре
+ * разных документа, поэтому собираем их сами и складываем в одну ленту.
+ *
+ * Берём только проведённые и неудалённые: в выгрузке хватает и черновиков, и
+ * помеченного на удаление, а по суммам их не отличить от настоящих платежей.
+ */
+export async function getOnecCashFlow(
+    cfg: OnecConfig,
+    dateFrom: string,
+    dateTo: string,
+    limitPerSource = 200
+): Promise<CashFlowRow[]> {
+    // 1С понимает только datetime-литералы, дата без времени отвергается.
+    const filter =
+        `Posted eq true and DeletionMark eq false` +
+        ` and Date ge datetime'${dateFrom}T00:00:00'` +
+        ` and Date le datetime'${dateTo}T23:59:59'`;
+
+    const parts = await Promise.all(
+        CASH_SOURCES.map(async src => {
+            const rows = await listEntity<Record<string, unknown>>(cfg, src.entity, {
+                top: limitPerSource,
+                filter,
+                orderby: 'Date desc'
+            });
+            return rows.map(r => ({ src, r }));
+        })
+    );
+    const all = parts.flat();
+    if (all.length === 0) return [];
+
+    const [partners, articles] = await Promise.all([
+        resolveNames(cfg, 'Catalog_Контрагенты', all.map(x => String(x.r.Контрагент_Key ?? ''))),
+        resolveNames(cfg, 'Catalog_СтатьиДвиженияДенежныхСредств', all.map(x => String(x.r.Статья_Key ?? '')))
+    ]);
+
+    const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
+
+    return all
+        .map(({ src, r }) => ({
+            kind: src.kind as CashKind,
+            incoming: src.incoming,
+            number: String(r.Number ?? '').trim(),
+            date: String(r.Date ?? '').slice(0, 10),
+            sum: num(r.СуммаДокумента),
+            operation: String(r.ВидОперации ?? '').trim(),
+            partner: partners.get(String(r.Контрагент_Key ?? '')) || '',
+            article: articles.get(String(r.Статья_Key ?? '')) || '',
+            purpose: String(r.НазначениеПлатежа ?? r.Комментарий ?? '').replace(/\s+/g, ' ').trim()
+        }))
+        .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
 }

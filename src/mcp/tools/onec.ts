@@ -7,6 +7,7 @@ import { inArea } from '../../auth/provider.js';
 import {
     ALLOWED_ENTITIES,
     countEntity,
+    getOnecCashFlow,
     getOnecStock,
     getOnecStockValue,
     listEntity,
@@ -1016,6 +1017,80 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             return text(`Спецификаций: ${wanted.length}\n\n${blocks.join('\n\n')}`);
         })
     );
-}
 
-export type { OnecEntity };
+    server.registerTool(
+        'onec_money',
+        {
+            title: '1С: движение денег по кассе и счёту',
+            description:
+                'Платежи за период: что пришло и что ушло, по кассе и расчётному счёту, с контрагентом и статьёй ДДС. ' +
+                'Единого журнала платежей в базе нет — приход и расход, касса и счёт лежат четырьмя разными документами, ' +
+                'здесь они сведены в одну ленту. Учитываются только проведённые и неудалённые документы.',
+            inputSchema: {
+                dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
+                dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
+                direction: z
+                    .enum(['приход', 'расход'])
+                    .optional()
+                    .describe('Только приход или только расход. Не указано — и то и другое.'),
+                where: z.enum(['касса', 'счёт']).optional().describe('Где смотреть. Не указано — везде.'),
+                search: z.string().optional().describe('Часть названия контрагента, статьи или назначения платежа'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько платежей показать, по умолчанию 25')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_money', async (args, extra) => {
+            const actor = actorOf(extra);
+            if (!onecReady() || !inArea(actor, 'money')) {
+                return fail('Область «себестоимость и прибыль» вам не открыта. Обратитесь к администратору.');
+            }
+            const from = args.dateFrom.slice(0, 10);
+            const to = args.dateTo.slice(0, 10);
+            const all = await getOnecCashFlow(config.onec, from, to);
+
+            const needle = args.search?.trim().toLowerCase();
+            const picked = all.filter(r => {
+                if (args.direction === 'приход' && !r.incoming) return false;
+                if (args.direction === 'расход' && r.incoming) return false;
+                if (args.where && r.kind !== args.where) return false;
+                if (!needle) return true;
+                return `${r.partner} ${r.article} ${r.purpose}`.toLowerCase().includes(needle);
+            });
+
+            if (picked.length === 0) {
+                return text(`Проведённых платежей за ${from} — ${to} по этим условиям нет.`);
+            }
+
+            // Итоги считаем по ВСЕМ отобранным, а не по показанным: иначе
+            // «пришло столько-то» означало бы «пришло столько-то в первых
+            // двадцати пяти строках», а это разные числа.
+            const inSum = picked.filter(r => r.incoming).reduce((a, r) => a + r.sum, 0);
+            const outSum = picked.filter(r => !r.incoming).reduce((a, r) => a + r.sum, 0);
+
+            const asked = args.limit ?? 25;
+            const shown = picked.slice(0, asked);
+
+            const head = [
+                `Платежей за ${from} — ${to}: ${picked.length}`,
+                `Пришло: ${money(inSum)}   ·   ушло: ${money(outSum)}   ·   разница: ${money(inSum - outSum)}`,
+                ''
+            ];
+
+            const lines = shown.map(r => {
+                const sign = r.incoming ? '+' : '−';
+                const who = r.partner || r.operation || '';
+                const tail = [r.article, r.purpose].filter(Boolean).join(' · ');
+                return (
+                    `${sign} ${money(r.sum)}  ${r.date}  ${r.kind}  № ${r.number || dash}` +
+                    (who ? `\n     ${who}` : '') +
+                    (tail ? `\n     ${tail.slice(0, 160)}` : '')
+                );
+            });
+
+            const more =
+                picked.length > shown.length ? [``, `… ещё платежей: ${picked.length - shown.length}`] : [];
+
+            return text([...head, ...lines, ...more].join('\n'));
+        })
+    );
+}
