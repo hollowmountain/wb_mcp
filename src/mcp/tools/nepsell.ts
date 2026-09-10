@@ -36,11 +36,27 @@ async function resolveLinks(actor: Actor, slug: string | undefined) {
         // раздельно. Для Nepsell же кабинеты парятся по юрлицу, поэтому
         // здесь префикс снимаем: oz-harbez и harbez — одна компания.
         config.ozon.map(c => ({ slug: c.slug.replace(/^oz-/, ''), clientId: c.clientId }))
-    ).filter(l => actor.cabinets === null || actor.cabinets.includes(l.slug));
+    )
+        // Связка сведена по юрлицу, а доступ выдаётся по площадкам, поэтому
+        // половины показываем раздельно: `harbez` открывает только Wildberries,
+        // `oz-harbez` — только Ozon. Иначе менеджер Ozon увидел бы через
+        // Непсель ещё и экономику Wildberries того же юрлица.
+        .map(l => {
+            if (actor.cabinets === null) return l;
+            const wbAllowed = actor.cabinets.includes(l.slug);
+            const ozonAllowed = actor.cabinets.includes(`oz-${l.slug}`);
+            return { ...l, wb: wbAllowed ? l.wb : null, ozon: ozonAllowed ? l.ozon : null };
+        })
+        // Юрлицо, от которого не осталось ни одной доступной площадки, не показываем вовсе.
+        .filter(l => l.wb !== null || l.ozon !== null);
 
     if (slug) {
-        const one = links.find(l => l.slug === slug.trim().toLowerCase());
+        // Кабинет можно назвать как по юрлицу (`harbez`), так и по слагу Ozon (`oz-harbez`).
+        const wanted = slug.trim().toLowerCase();
+        const one = links.find(l => l.slug === wanted || `oz-${l.slug}` === wanted);
         if (!one) throw new Error(`Кабинет «${slug}» вам не доступен или Nepsell его не знает.`);
+        // Спросили именно про Ozon — Wildberries в ответ не подмешиваем.
+        if (wanted.startsWith('oz-')) return [{ ...one, wb: null }];
         return [one];
     }
     return links;
@@ -74,10 +90,15 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
 
             const links = await resolveLinks(actorNow, undefined);
             const lines = links.map(l => {
+                // Площадку, которая человеку не открыта, не поминаем вовсе:
+                // «не связан» здесь читалось бы как факт о кабинете, а это
+                // всего лишь граница его доступа.
+                const seesWb = actorNow.cabinets === null || actorNow.cabinets.includes(l.slug);
+                const seesOzon = actorNow.cabinets === null || actorNow.cabinets.includes(`oz-${l.slug}`);
                 const parts = [
-                    l.wb ? `Wildberries: ${l.wb.name} (${l.wb.client_id})` : 'Wildberries: не связан',
-                    l.ozon ? `Ozon: ${l.ozon.name} (${l.ozon.client_id})` : 'Ozon: не связан'
-                ];
+                    seesWb ? (l.wb ? `Wildberries: ${l.wb.name} (${l.wb.client_id})` : 'Wildberries: не связан') : null,
+                    seesOzon ? (l.ozon ? `Ozon: ${l.ozon.name} (${l.ozon.client_id})` : 'Ozon: не связан') : null
+                ].filter((p): p is string => p !== null);
                 return `${l.slug}\n   ${parts.join('\n   ')}`;
             });
             return text(lines.join('\n\n') || 'Nepsell не знает ни одного из доступных вам кабинетов.');
@@ -91,7 +112,7 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
             description:
                 'Настоящая экономика товаров за период: выручка, СЕБЕСТОИМОСТЬ, комиссия, логистика, реклама, налоги и прибыль. Себестоимости нет ни в API Wildberries, ни в API Ozon — она есть только здесь, поэтому маржу и прибыль считайте по этому инструменту, а не по данным площадок.',
             inputSchema: {
-                cabinet: z.string().optional().describe('Кабинет. Не указан — по всем доступным.'),
+                cabinet: z.string().optional().describe('Кабинет: по юрлицу (harbez) или по слагу Ozon (oz-harbez) — тогда только Ozon. Не указан — по всем доступным.'),
                 marketplace: marketArg,
                 dateFrom: dateArg('Начало периода'),
                 dateTo: dateArg('Конец периода'),
@@ -163,7 +184,7 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
             description:
                 'Рекламные кампании в связке с продажами: расход, ДРР, показы, клики, заказы прямые и по связанным товарам. API Wildberries отдаёт расход и продажи по отдельности и не связывает их между собой — эта связка есть только здесь.',
             inputSchema: {
-                cabinet: z.string().optional().describe('Кабинет. Не указан — по всем доступным.'),
+                cabinet: z.string().optional().describe('Кабинет: по юрлицу (harbez) или по слагу Ozon (oz-harbez) — тогда только Ozon. Не указан — по всем доступным.'),
                 marketplace: marketArg,
                 dateFrom: dateArg('Начало периода'),
                 dateTo: dateArg('Конец периода'),
