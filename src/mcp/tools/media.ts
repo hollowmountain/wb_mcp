@@ -5,10 +5,8 @@ import type { Actor } from '../../auth/provider.js';
 import { inArea } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { check, estimate, isTerminal, MODELS, submit, HiggsfieldError } from '../../media/higgsfield.js';
+import { decodePlan, encodePlan, planErrorText, type Plan } from '../../media/plan.js';
 import { actorOf, fail, guarded, text } from './common.js';
-
-/** Дороже этого — не запускаем молча, а спрашиваем. */
-const ASK_ABOVE_USD = 0.5;
 
 const ready = (): boolean => Boolean(config.higgsfield.keyId && config.higgsfield.keySecret);
 const available = (actor: Actor): boolean => ready() && inArea(actor, 'media');
@@ -23,44 +21,45 @@ function denied(actor: Actor): string | null {
     return null;
 }
 
-/** Ошибку площадки показываем человеческими словами, а не как есть. */
 const explain = (e: unknown): string =>
     e instanceof HiggsfieldError ? e.toUserMessage() : e instanceof Error ? e.message : String(e);
+
+/** Собираем тело запроса одинаково и при оценке, и при запуске: иначе согласовали бы одно, а ушло другое. */
+function paramsOf(plan: Pick<Plan, 'what' | 'prompt' | 'imageUrl' | 'seconds'>): Record<string, unknown> {
+    const model = MODELS[plan.what];
+    const p: Record<string, unknown> = { prompt: plan.prompt };
+    if (plan.imageUrl) p[model.kind === 'image' ? 'image_reference_url' : 'image_url'] = plan.imageUrl;
+    if (model.kind === 'video') p.duration = plan.seconds ?? 6;
+    return p;
+}
 
 export function registerMediaTools(server: McpServer, actor: Actor): void {
     if (!available(actor)) return;
 
     server.registerTool(
-        'media_generate',
+        'media_plan',
         {
-            title: 'Сгенерировать картинку или видео',
+            title: 'Согласовать генерацию перед запуском',
             description:
-                'Ставит генерацию в очередь и возвращает номер задачи. Результат забирается отдельно, инструментом media_result: ' +
-                'даже картинка считается около трёх минут, а ролик дольше, и ждать внутри одного вызова нельзя. ' +
-                'ВАЖНО про товары: модель рисует похожий предмет и дописывает на него выдуманные буквы, поэтому ' +
-                'для карточек с настоящим товаром она не годится — только фоны, сцены и оживление готового фото.',
+                'Первый и обязательный шаг. Считает цену и возвращает план — подписанную строку, которую надо ПОКАЗАТЬ ЧЕЛОВЕКУ ' +
+                'вместе с промтом и ценой и дождаться прямого «да». Ничего не генерирует и денег не тратит. ' +
+                'Промт составляете вы, по-английски и подробно: что за предмет, что в кадре, свет, объектив, чего быть не должно.',
             inputSchema: {
                 what: z
                     .enum(['photo', 'video_fast', 'video'])
                     .describe(
-                        'photo — картинка по описанию (0,05 кредита); ' +
-                            'video_fast — ролик из готового фото подешевле (~3 кредита); ' +
-                            'video — ролик из фото поплавнее (~3,4 кредита)'
+                        'photo — картинка (~0,003 $); video_fast — ролик подешевле (~0,19 $); video — ролик поплавнее (~0,21 $)'
                     ),
-                prompt: z.string().min(3).describe('Что должно получиться, словами'),
+                prompt: z.string().min(20).describe('Готовый промт по-английски. Короткий промт даёт случайный результат.'),
                 imageUrl: z
                     .string()
                     .optional()
-                    .describe('Ссылка на исходное фото. Обязательна для video и video_fast.'),
-                seconds: z.number().int().optional().describe('Длительность ролика: 6 или 10. По умолчанию 6.'),
-                confirmCost: z
-                    .boolean()
-                    .optional()
-                    .describe('Подтверждение, если оценка вышла дороже половины доллара')
+                    .describe('Ссылка на исходное фото. Для роликов обязательна, для картинки — образец предмета.'),
+                seconds: z.number().int().optional().describe('Длительность ролика: 6 или 10. По умолчанию 6.')
             },
-            annotations: { readOnlyHint: false, openWorldHint: true }
+            annotations: { readOnlyHint: true, openWorldHint: true }
         },
-        guarded('media_generate', async (args, extra) => {
+        guarded('media_plan', async (args, extra) => {
             const who = actorOf(extra);
             const no = denied(who);
             if (no) return fail(no);
@@ -70,33 +69,81 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                 return fail(`Для «${model.label}» нужна ссылка на исходное фото — параметр imageUrl.`);
             }
 
-            const params: Record<string, unknown> = { prompt: args.prompt };
-            if (args.imageUrl) params.image_url = args.imageUrl;
-            if (model.kind === 'video') params.duration = args.seconds ?? 6;
+            const draft = {
+                what: args.what,
+                prompt: args.prompt.trim(),
+                ...(args.imageUrl ? { imageUrl: args.imageUrl } : {}),
+                ...(args.seconds ? { seconds: args.seconds } : {})
+            };
 
             try {
-                // Считаем цену до запуска. Ни остатка на счёте, ни стоимости
-                // в готовом результате API не отдаёт — если не спросить
-                // сейчас, узнать будет негде.
-                const cost = await estimate(config.higgsfield, model.path, params);
+                // Цену узнаём только здесь: остатка на счёте API не отдаёт, в
+                // готовом результате стоимости тоже нет.
+                const cost = await estimate(config.higgsfield, model.path, paramsOf(draft));
 
-                if (cost.usd > ASK_ABOVE_USD && !args.confirmCost) {
-                    return text(
-                        `Эта генерация стоит ${money(cost.usd)} (${cost.credits} кредита) — дороже обычного.\n` +
-                            'Если запускаем, повторите вызов с confirmCost: true.'
-                    );
-                }
-
-                const job = await submit(config.higgsfield, model.path, params);
+                const plan: Plan = {
+                    ...draft,
+                    usd: cost.usd,
+                    credits: cost.credits,
+                    email: who.email,
+                    at: Math.floor(Date.now() / 1000)
+                };
 
                 return text(
                     [
-                        `Поставлено в очередь: ${model.label}`,
+                        `Что будет сделано: ${model.label}`,
                         `Стоимость: ${money(cost.usd)} (${cost.credits} кредита)`,
+                        draft.imageUrl ? `Исходное фото: ${draft.imageUrl}` : 'Без исходного фото',
+                        model.kind === 'video' ? `Длительность: ${draft.seconds ?? 6} с` : '',
+                        '',
+                        'Промт:',
+                        draft.prompt,
+                        '',
+                        'ПОКАЖИТЕ ЭТО ЧЕЛОВЕКУ И ДОЖДИТЕСЬ ЯВНОГО СОГЛАСИЯ.',
+                        'После «да» — media_generate с этой строкой:',
+                        encodePlan(plan)
+                    ]
+                        .filter(Boolean)
+                        .join('\n')
+                );
+            } catch (e) {
+                return fail(explain(e));
+            }
+        })
+    );
+
+    server.registerTool(
+        'media_generate',
+        {
+            title: 'Запустить согласованную генерацию',
+            description:
+                'Второй шаг. Принимает ТОЛЬКО план из media_plan — своих параметров у него нет, поэтому запустится ровно то, ' +
+                'что видел человек. Вызывать можно лишь после его прямого согласия. Ставит в очередь и возвращает номер: ' +
+                'картинка считается около трёх минут, ролик дольше, результат забирается через media_result.',
+            inputSchema: {
+                plan: z.string().min(20).describe('Строка плана из media_plan, целиком и без изменений')
+            },
+            annotations: { readOnlyHint: false, openWorldHint: true }
+        },
+        guarded('media_generate', async (args, extra) => {
+            const who = actorOf(extra);
+            const no = denied(who);
+            if (no) return fail(no);
+
+            const plan = decodePlan(args.plan, who.email);
+            if (typeof plan === 'string') return fail(planErrorText(plan));
+
+            const model = MODELS[plan.what];
+            try {
+                const job = await submit(config.higgsfield, model.path, paramsOf(plan));
+                return text(
+                    [
+                        `Запущено: ${model.label}`,
+                        `Списывается: ${money(plan.usd)} (${plan.credits} кредита)`,
                         `Номер задачи: ${job.requestId}`,
                         '',
-                        'Через пару минут спросите результат: media_result с этим номером.',
-                        'Готовый файл Higgsfield хранит семь дней, потом удаляет — нужное сразу сохраняйте себе.'
+                        'Через пару минут — media_result с этим номером.',
+                        'Готовый файл живёт семь дней, нужное сразу сохраняйте себе.'
                     ].join('\n')
                 );
             } catch (e) {
