@@ -10,6 +10,12 @@ export interface OzonCabinet {
     slug: string;
     clientId: string;
     apiKey: string;
+    /**
+     * Ключи рекламного кабинета — другая служба и другая пара доступов,
+     * см. ozon/performance.ts. Необязательны: кабинет без них просто живёт
+     * без рекламы, остальные инструменты работают как прежде.
+     */
+    perf?: { clientId: string; secret: string };
 }
 
 export interface OzonSellerInfo {

@@ -144,7 +144,21 @@ function buildOzonCabinets(): OzonCabinet[] {
                 `Кабинет Ozon «${slug}» объявлен в OZON_CABINETS, но OZON_CLIENT_ID_${key} или OZON_API_KEY_${key} пуст`
             );
         }
-        out.push({ slug, clientId, apiKey });
+        // Реклама живёт в отдельном кабинете с отдельной парой ключей.
+        // Их может не быть — тогда по этому кабинету просто нет рекламы.
+        const perfId = process.env[`OZON_PERF_CLIENT_ID_${key}`]?.trim();
+        const perfSecret = process.env[`OZON_PERF_SECRET_${key}`]?.trim();
+        if ((perfId && !perfSecret) || (!perfId && perfSecret)) {
+            throw new Error(
+                `Кабинет Ozon «${slug}»: OZON_PERF_CLIENT_ID_${key} и OZON_PERF_SECRET_${key} задаются только парой`
+            );
+        }
+        out.push({
+            slug,
+            clientId,
+            apiKey,
+            ...(perfId && perfSecret ? { perf: { clientId: perfId, secret: perfSecret } } : {})
+        });
     }
     return out;
 }

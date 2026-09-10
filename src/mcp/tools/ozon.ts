@@ -17,6 +17,7 @@ import {
     listOzonReturns,
     type OzonCabinet
 } from '../../ozon/client.js';
+import { ctr, dailyStats, drr, hasPerf, listCampaigns, rollUpByCampaign } from '../../ozon/performance.js';
 import { actorOf, guarded, text, type ToolResult } from './common.js';
 
 const dash = '—';
@@ -79,6 +80,9 @@ const day = (v: string | undefined): string => (v ? v.slice(0, 10) : dash);
 
 const money = (n: number): string =>
     `${n.toLocaleString('ru-RU', { maximumFractionDigits: 0 })} \u20bd`;
+
+/** \u0414\u043e\u043b\u044f, \u043a\u043e\u0442\u043e\u0440\u043e\u0439 \u043c\u043e\u0436\u0435\u0442 \u043d\u0435 \u0431\u044b\u0442\u044c: \u0431\u0435\u0437 \u043f\u043e\u043a\u0430\u0437\u043e\u0432 CTR \u043d\u0435 \u043d\u043e\u043b\u044c, \u0430 \u00ab\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e\u00bb. */
+const pctOrDash = (v: number | null): string => (v === null ? dash : `${v}%`);
 
 const dateArg = (what: string) =>
     z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Дата в виде 2026-09-01').describe(what);
@@ -496,5 +500,80 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                 return `${head}\n\n${lines.join('\n')}`;
             })
         )
+    );
+
+    server.registerTool(
+        'ozon_ads',
+        {
+            title: 'Ozon: реклама и окупаемость',
+            description:
+                'Рекламные кампании Ozon за период: расход, показы, клики, CTR, заказы и выручка от рекламы, ДРР. ' +
+                'Это отдельный от Seller API рекламный кабинет — в обычной аналитике Ozon все рекламные показатели отключены.',
+            inputSchema: {
+                cabinet: z.string().optional().describe('Кабинет Ozon (oz-harbez). Не указан — по всем доступным.'),
+                dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
+                dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
+                limit: z.number().int().min(1).max(100).optional().describe('Сколько кампаний показать, по умолчанию 15')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('ozon_ads', async (args, extra) => {
+            const cabs = resolve(actorOf(extra), args.cabinet);
+            const withPerf = cabs.filter(hasPerf);
+            if (withPerf.length === 0) {
+                return text(
+                    'Ни по одному доступному вам кабинету не заведены ключи рекламного кабинета. ' +
+                        'Их выпускают отдельно от ключей продавца, в разделе продвижения.'
+                );
+            }
+
+            const skipped = cabs.filter(c => !hasPerf(c)).map(c => c.slug);
+            const top = args.limit ?? 15;
+            const blocks: string[] = [];
+
+            for (const cab of withPerf) {
+                const [rows, campaigns] = await Promise.all([
+                    dailyStats(cab, args.dateFrom, args.dateTo),
+                    listCampaigns(cab).catch(() => [])
+                ]);
+                const { totals, campaigns: rolled } = rollUpByCampaign(rows);
+                const stateOf = new Map(campaigns.map(c => [c.id, c.state.replace(/^CAMPAIGN_STATE_/, '').toLowerCase()]));
+
+                const t = totals;
+                const head = `━━ ${cab.slug} · ${args.dateFrom} — ${args.dateTo} ━━`;
+                const lines = [
+                    head,
+                    `Расход: ${money(t.spent)}   ·   выручка от рекламы: ${money(t.ordersMoney)}   ·   заказов: ${t.orders}`,
+                    `ДРР: ${pctOrDash(drr(t.spent, t.ordersMoney))}   ·   показов: ${t.views.toLocaleString('ru-RU')}   ·   кликов: ${t.clicks.toLocaleString('ru-RU')}   ·   CTR: ${pctOrDash(ctr(t.clicks, t.views))}`,
+                    ''
+                ];
+
+                if (rolled.length === 0) {
+                    lines.push('За период по этому кабинету рекламных данных нет.');
+                } else {
+                    // Показываем на строку больше, чем просили: иначе «кампаний N»
+                    // не отличить от «их ровно N».
+                    const shown = rolled.slice(0, top);
+                    lines.push(`Кампании по расходу (всего ${rolled.length}):`);
+                    for (const [i, c] of shown.entries()) {
+                        const st = stateOf.get(c.id);
+                        lines.push(
+                            `  ${i + 1}. ${c.title}${st ? ` · ${st}` : ''}` +
+                                `\n      расход ${money(c.spent)} · выручка ${money(c.ordersMoney)} · ДРР ${pctOrDash(drr(c.spent, c.ordersMoney))}` +
+                                `\n      показов ${c.views.toLocaleString('ru-RU')} · кликов ${c.clicks} · CTR ${pctOrDash(ctr(c.clicks, c.views))} · заказов ${c.orders}`
+                        );
+                    }
+                    if (rolled.length > shown.length) {
+                        lines.push(`  … ещё кампаний: ${rolled.length - shown.length}`);
+                    }
+                }
+                blocks.push(lines.filter(l => l !== undefined).join('\n'));
+            }
+
+            if (skipped.length > 0) {
+                blocks.push(`Без рекламных ключей, поэтому не вошли в отчёт: ${skipped.join(', ')}.`);
+            }
+            return text(blocks.join('\n\n'));
+        })
     );
 }

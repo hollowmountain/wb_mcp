@@ -88,7 +88,10 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     nep_economy: 'money',
     ozon_finance: 'money',
     onec_stock_value: 'money',
-    nep_ads: 'money'
+    nep_ads: 'money',
+    // Реклама Ozon — своя область: расход и ДРР нужны менеджеру площадки,
+    // а себестоимость и прибыль ему не нужны.
+    ozon_ads: 'ads'
 };
 
 type Handler = (args: never, extra: never) => Promise<unknown>;

@@ -9,7 +9,7 @@
  * Список намеренно короткий. Каждая область должна отвечать чьей-то настоящей
  * работе, иначе она превращается в галочку, которую ставят не думая.
  */
-export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'erp', 'supply', 'payroll', 'people', 'money'] as const;
+export const AREAS = ['inbox', 'reply', 'catalog', 'stock', 'orders', 'ads', 'erp', 'supply', 'payroll', 'people', 'money'] as const;
 
 export type Area = (typeof AREAS)[number];
 
@@ -19,11 +19,12 @@ export const AREA_LABELS: Record<Area, string> = {
     catalog: 'товары и цены',
     stock: 'остатки на складах',
     orders: 'заказы и возвраты на площадках',
+    ads: 'рекламные кампании на площадках',
     erp: 'учётная система 1С',
     supply: 'поставщики и закупочные цены',
     payroll: 'сдельная оплата труда',
     people: 'видеть работу коллег в панели',
-    money: 'себестоимость, прибыль, реклама'
+    money: 'себестоимость и прибыль'
 };
 
 /**
@@ -32,6 +33,9 @@ export const AREA_LABELS: Record<Area, string> = {
  */
 export const AREA_NOTES: Partial<Record<Area, string>> = {
     reply: 'Без inbox бессмысленна: отвечать не на что.',
+    ads:
+        'Отделена от money: менеджеру площадки нужен расход и ДРР, но себестоимость и прибыль — нет. ' +
+        'Пока реклама лежала внутри money, открыть одно без другого было нельзя.',
     erp: 'Отдельно от orders: у 1С нет разреза по кабинетам, там данные всей компании сразу.',
     supply:
         'Отделена от erp: по закупочным ценам и списку поставщиков читается вся структура наценки. ' +
@@ -66,8 +70,10 @@ export const PROFILES: Record<string, { label: string; areas: readonly Area[]; a
     },
     manager: {
         label: 'Менеджер площадки',
-        areas: ['inbox', 'catalog', 'stock', 'orders'],
-        about: 'Ведёт площадку: товары, остатки, заказы, возвраты. Переписку видит, отвечать не может.'
+        areas: ['inbox', 'catalog', 'stock', 'orders', 'ads'],
+        about:
+            'Ведёт площадку: товары, остатки, заказы, возвраты и реклама. Переписку видит, отвечать не может. ' +
+            'Реклама тут без себестоимости: расход и ДРР видны, прибыль — нет.'
     },
     operations: {
         label: 'Закупки и склад',
@@ -85,7 +91,7 @@ export const PROFILES: Record<string, { label: string; areas: readonly Area[]; a
     },
     finance: {
         label: 'Финансы',
-        areas: ['money', 'orders', 'erp', 'supply', 'payroll', 'catalog'],
+        areas: ['money', 'ads', 'orders', 'erp', 'supply', 'payroll', 'catalog'],
         about: 'Себестоимость, прибыль, окупаемость рекламы. Переписки с покупателями не видит.'
     },
     owner: {
