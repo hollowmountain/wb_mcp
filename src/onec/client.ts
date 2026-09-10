@@ -457,7 +457,7 @@ export async function getOnecCashFlow(
     cfg: OnecConfig,
     dateFrom: string,
     dateTo: string,
-    limitPerSource = 200
+    maxPerSource = 5000
 ): Promise<CashFlowRow[]> {
     // 1С понимает только datetime-литералы, дата без времени отвергается.
     const filter =
@@ -465,13 +465,27 @@ export async function getOnecCashFlow(
         ` and Date ge datetime'${dateFrom}T00:00:00'` +
         ` and Date le datetime'${dateTo}T23:59:59'`;
 
+    const PAGE_SIZE = 500;
+
     const parts = await Promise.all(
         CASH_SOURCES.map(async src => {
-            const rows = await listEntity<Record<string, unknown>>(cfg, src.entity, {
-                top: limitPerSource,
-                filter,
-                orderby: 'Date desc'
-            });
+            // Забираем период целиком, а не первую страницу: расходов со счёта
+            // за месяц набегает под шесть сотен, и обрезанная выборка выглядела
+            // бы как полная — итог занижался молча.
+            //
+            // Сортировка по Ref_Key обязательна: 1С не гарантирует порядок строк
+            // между запросами, и без неё страницы перекрываются.
+            const rows: Record<string, unknown>[] = [];
+            for (let skip = 0; skip < maxPerSource; skip += PAGE_SIZE) {
+                const page = await listEntity<Record<string, unknown>>(cfg, src.entity, {
+                    top: PAGE_SIZE,
+                    skip,
+                    filter,
+                    orderby: 'Ref_Key'
+                });
+                rows.push(...page);
+                if (page.length < PAGE_SIZE) break;
+            }
             return rows.map(r => ({ src, r }));
         })
     );
