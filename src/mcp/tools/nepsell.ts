@@ -62,14 +62,30 @@ async function resolveLinks(actor: Actor, slug: string | undefined) {
     return links;
 }
 
+/**
+ * Nepsell открыт менеджерам площадок, а не только финансам.
+ *
+ * Себестоимость в Nepsell заложена с запасом — так сделано намеренно, чтобы
+ * менеджеры вели учёт по осторожной цифре. Настоящая себестоимость лежит в
+ * 1С, и вот она закрыта областью money вместе с прибылью по ней. Пока
+ * Nepsell целиком висел на money, менеджер не мог увидеть даже собственную
+ * выручку, не получив заодно настоящие деньги компании.
+ */
+const available = (actor: Actor): boolean => Boolean(config.nepsell.token) && inArea(actor, 'orders');
+
+/** Реклама — своя область: расход и ДРР нужны не всем, кому нужны продажи. */
+const seesAds = (actor: Actor): boolean => available(actor) && inArea(actor, 'ads');
+
 /** Проверяем и здесь, не только при регистрации: список инструментов у клиента кэшируется. */
 function denyIfNotAllowed(actor: Actor): string | null {
     if (available(actor)) return null;
-    return 'Область «себестоимость и прибыль» вам не открыта. Обратитесь к администратору, если это нужно по работе.';
+    return 'Область «заказы и возвраты на площадках» вам не открыта. Обратитесь к администратору, если это нужно по работе.';
 }
 
-/** Nepsell живёт целиком в области money: там себестоимость и прибыль. */
-const available = (actor: Actor): boolean => Boolean(config.nepsell.token) && inArea(actor, 'money');
+function denyIfNoAds(actor: Actor): string | null {
+    if (seesAds(actor)) return null;
+    return 'Область «рекламные кампании на площадках» вам не открыта. Обратитесь к администратору, если это нужно по работе.';
+}
 
 export function registerNepsellTools(server: McpServer, actor: Actor): void {
     if (!available(actor)) return;
@@ -177,6 +193,8 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
         })
     );
 
+    if (!seesAds(actor)) return;
+
     server.registerTool(
         'nep_ads',
         {
@@ -194,7 +212,7 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
         },
         guarded('nep_ads', async (args, extra) => {
             const actorNow = actorOf(extra);
-            const denied = denyIfNotAllowed(actorNow);
+            const denied = denyIfNoAds(actorNow);
             if (denied) return fail(denied);
 
             const links = await resolveLinks(actorNow, args.cabinet);
