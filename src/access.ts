@@ -1,5 +1,6 @@
 import type { Actor } from './auth/provider.js';
 import { config } from './config.js';
+import type { OzonCabinet } from './ozon/client.js';
 import { CabinetError, type Cabinet } from './wb/cabinets.js';
 
 /**
@@ -70,4 +71,24 @@ export function hasAnyCabinet(actor: Actor): boolean {
     if (actor.cabinets === null) return config.cabinets.size > 0;
     const scope = new Set(actor.cabinets);
     return config.cabinets.all().some(c => scope.has(c.slug));
+}
+
+/**
+ * Кабинет Ozon по слагу. Тот же смысл, что у resolveCabinet для Wildberries:
+ * половины площадок выдаются раздельно, поэтому oz-harbez и harbez — разные
+ * права, и подставлять одно вместо другого нельзя.
+ */
+export function resolveOzonCabinet(actor: Actor, slug: string): OzonCabinet {
+    const all = config.ozon;
+    const scope = actor.cabinets;
+    const allowed = scope === null ? all : all.filter(c => scope.includes(c.slug));
+    if (allowed.length === 0) {
+        throw new CabinetError('Кабинеты Ozon вам не открыты. Обратитесь к администратору.');
+    }
+    const wanted = slug.trim().toLowerCase();
+    const one = allowed.find(c => c.slug === wanted);
+    if (!one) {
+        throw new CabinetError(`Кабинет «${slug}» вам не доступен. Доступны: ${allowed.map(c => c.slug).join(', ')}`);
+    }
+    return one;
 }

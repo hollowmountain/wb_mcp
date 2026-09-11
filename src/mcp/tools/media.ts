@@ -1,14 +1,14 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import { resolveCabinet } from '../../access.js';
+import { resolveCabinet, resolveOzonCabinet } from '../../access.js';
 import type { Actor } from '../../auth/provider.js';
 import { inArea } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { describe as describeBudget, record as recordSpend, refuseIfOverLimit } from '../../media/budget.js';
 import { edit, estimateUsd, OpenAiError, type Quality } from '../../media/openai.js';
 import { decodePlan, encodePlan, planErrorText, type Plan } from '../../media/plan.js';
-import { listPhotos, ReferenceError_, resolveReference } from '../../media/reference.js';
+import { listOzonPhotos, listPhotos, ReferenceError_, resolveReference } from '../../media/reference.js';
 import { listUploads } from '../../media/uploads.js';
 import {
     buildPrompt,
@@ -91,7 +91,11 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                 'с инфографикой, а генерации нужен кадр с чистым товаром.',
             inputSchema: {
                 nmId: z.number().int().positive().optional().describe('Номенклатура Wildberries'),
-                cabinet: z.string().optional().describe('Кабинет Wildberries')
+                offerId: z.string().optional().describe('Артикул продавца на Ozon'),
+                cabinet: z
+                    .string()
+                    .optional()
+                    .describe('Кабинет: harbez для Wildberries, oz-harbez для Ozon')
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -113,6 +117,25 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                           ...mine.map(u => `   ${u.code} — ${u.note ?? 'без описания'}, ${Math.round(u.bytes / 1024)} КБ`)
                       ];
 
+            if (args.offerId) {
+                if (!args.cabinet) return fail('Чтобы показать фото из карточки Ozon, нужен кабинет вида oz-harbez.');
+                const ozon = resolveOzonCabinet(who, args.cabinet);
+                const found = await listOzonPhotos(ozon, args.offerId);
+                if (found.photos.length === 0) return fail(`У товара «${args.offerId}» в карточке Ozon нет фотографий.`);
+                return text(
+                    [
+                        ...ownBlock,
+                        '',
+                        `${found.name || args.offerId} — фотографий в карточке Ozon: ${found.photos.length}`,
+                        ...found.photos.map((url, i) => `${i + 1}. ${url}`),
+                        '',
+                        'ПОКАЖИТЕ ЭТОТ СПИСОК ЧЕЛОВЕКУ и спросите, какой кадр брать: нужен тот, где товар снят',
+                        'без наложенной инфографики. Первый обычно главный и как раз с надписями.',
+                        'Номер кадра передаётся в media_plan параметром photo вместе с offerId.'
+                    ].join('\n')
+                );
+            }
+
             if (!args.nmId) return text(ownBlock.join('\n'));
             if (!args.cabinet) return fail('Чтобы показать фото из карточки, нужен кабинет Wildberries.');
 
@@ -127,7 +150,8 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                     `Фотографий в карточке: ${photos.length}`,
                     ...photos.map((url, i) => `${i + 1}. ${url}`),
                     '',
-                    'Для генерации нужен кадр, где товар снят без наложенного текста и без подтёков поверх букв.',
+                    'ПОКАЖИТЕ ЭТОТ СПИСОК ЧЕЛОВЕКУ и спросите, какой кадр брать: нужен тот, где товар снят',
+                    'без наложенного текста и без подтёков поверх букв. Первое фото обычно с инфографикой.',
                     'Номер кадра передаётся в media_plan параметром photo.'
                 ].join('\n')
             );
@@ -163,6 +187,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                     .optional()
                     .describe('Код своего снимка, загруженного в панели: ref-xxxxxx. Предпочтительнее кадра из карточки.'),
                 nmId: z.number().int().positive().optional().describe('Товар на Wildberries — фото возьмётся из его карточки'),
+                offerId: z.string().optional().describe('Артикул продавца на Ozon — фото возьмётся из карточки Ozon'),
                 photo: z.number().int().positive().optional().describe('Номер фото в карточке, по умолчанию первое'),
                 imageUrl: z
                     .string()
@@ -189,11 +214,11 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             const no = denied(who);
             if (no) return fail(no);
 
-            if (!args.upload && !args.nmId && !args.imageUrl) {
+            if (!args.upload && !args.nmId && !args.offerId && !args.imageUrl) {
                 return fail(
                     'Нужно исходное фото товара. Спросите у человека, что берём: его собственный снимок ' +
                         '(тогда пусть загрузит на странице /panel/reference и назовёт код ref-xxxxxx) ' +
-                        'или кадр из карточки площадки (тогда нужен nmId и кабинет).'
+                        'или кадр из карточки площадки (nmId и кабинет для Wildberries, offerId и кабинет oz- для Ozon).'
                 );
             }
 
@@ -223,7 +248,9 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
 
             // Фото скачиваем уже сейчас: пусть ошибка «нет такого товара»
             // придёт до согласования, а не после «да».
-            const cabinet = args.cabinet ? resolveCabinet(who, args.cabinet) : null;
+            const isOzon = Boolean(args.offerId);
+            const cabinet = args.cabinet && !isOzon ? resolveCabinet(who, args.cabinet) : null;
+            const ozon = args.cabinet && isOzon ? resolveOzonCabinet(who, args.cabinet) : null;
             let source: string;
             try {
                 const reference = await resolveReference(
@@ -231,10 +258,12 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                     {
                         ...(args.upload ? { upload: args.upload } : {}),
                         ...(args.nmId ? { nmId: args.nmId } : {}),
+                        ...(args.offerId ? { offerId: args.offerId } : {}),
                         ...(args.photo ? { photo: args.photo } : {}),
                         ...(args.imageUrl ? { imageUrl: args.imageUrl } : {})
                     },
-                    who.email
+                    who.email,
+                    ozon
                 );
                 source = reference.source;
             } catch (e) {
@@ -249,6 +278,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                 cabinet: args.cabinet ?? null,
                 ...(args.upload ? { upload: args.upload } : {}),
                 ...(args.nmId ? { nmId: args.nmId } : {}),
+                ...(args.offerId ? { offerId: args.offerId } : {}),
                 ...(args.photo ? { photo: args.photo } : {}),
                 ...(args.imageUrl ? { imageUrl: args.imageUrl } : {}),
                 overlay,
@@ -304,16 +334,20 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             const size = SIZES[plan.size];
 
             try {
-                const cabinet = plan.cabinet ? resolveCabinet(who, plan.cabinet) : null;
+                const planIsOzon = Boolean(plan.offerId);
+                const cabinet = plan.cabinet && !planIsOzon ? resolveCabinet(who, plan.cabinet) : null;
+                const ozon = plan.cabinet && planIsOzon ? resolveOzonCabinet(who, plan.cabinet) : null;
                 const reference = await resolveReference(
                     cabinet,
                     {
                         ...(plan.upload ? { upload: plan.upload } : {}),
                         ...(plan.nmId ? { nmId: plan.nmId } : {}),
+                        ...(plan.offerId ? { offerId: plan.offerId } : {}),
                         ...(plan.photo ? { photo: plan.photo } : {}),
                         ...(plan.imageUrl ? { imageUrl: plan.imageUrl } : {})
                     },
-                    who.email
+                    who.email,
+                    ozon
                 );
 
                 const result = await edit(config.media, {

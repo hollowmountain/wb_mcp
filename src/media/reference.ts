@@ -15,6 +15,7 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
 import { readUpload } from './uploads.js';
+import { getOzonProductPhotos, type OzonCabinet } from '../ozon/client.js';
 import { getCardByNmId } from '../wb/api.js';
 import type { Cabinet } from '../wb/cabinets.js';
 
@@ -109,6 +110,8 @@ export interface ReferenceRequest {
     /** Код своего снимка, загруженного в панели: ref-xxxxxx. */
     upload?: string;
     nmId?: number;
+    /** Артикул продавца на Ozon. */
+    offerId?: string;
     /** Номер снимка в карточке, считая с единицы. */
     photo?: number;
     imageUrl?: string;
@@ -121,7 +124,8 @@ export interface ReferenceRequest {
 export async function resolveReference(
     cabinet: Cabinet | null,
     request: ReferenceRequest,
-    email?: string
+    email?: string,
+    ozon?: OzonCabinet | null
 ): Promise<Reference> {
     // Свой снимок имеет приоритет: если человек его загрузил, значит он и
     // считает его лучшим исходником, чем то, что лежит в карточке.
@@ -145,7 +149,23 @@ export async function resolveReference(
 
     if (request.imageUrl) return download(request.imageUrl);
 
-    if (!request.nmId) throw new ReferenceError_('Нужен свой исходник, nmID товара или прямая ссылка на фото.');
+    if (request.offerId) {
+        if (!ozon) throw new ReferenceError_('Чтобы найти фото по артикулу Ozon, укажите кабинет Ozon.');
+        const found = await getOzonProductPhotos(ozon, { offerId: request.offerId });
+        if (found.photos.length === 0) {
+            throw new ReferenceError_(`У товара «${request.offerId}» в карточке Ozon нет фотографий.`);
+        }
+        const index = Math.max(1, request.photo ?? 1);
+        if (index > found.photos.length) {
+            throw new ReferenceError_(`У товара всего ${found.photos.length} фото, а запрошено ${index}-е.`);
+        }
+        const url = found.photos[index - 1];
+        if (!url) throw new ReferenceError_(`У товара нет ${index}-го фото.`);
+        const reference = await download(url);
+        return { ...reference, source: `Ozon ${request.offerId}, фото ${index} из ${found.photos.length}` };
+    }
+
+    if (!request.nmId) throw new ReferenceError_('Нужен свой исходник, товар на площадке или прямая ссылка на фото.');
     if (!cabinet) throw new ReferenceError_('Чтобы найти фото по nmID, укажите кабинет Wildberries.');
 
     const card = await getCardByNmId(cabinet, request.nmId);
@@ -170,4 +190,10 @@ export async function resolveReference(
 export async function listPhotos(cabinet: Cabinet, nmId: number): Promise<string[]> {
     const card = await getCardByNmId(cabinet, nmId);
     return (card?.photos ?? []).map(p => p.big).filter(Boolean);
+}
+
+/** То же для Ozon: там за картинками надо идти отдельным запросом. */
+export async function listOzonPhotos(cabinet: OzonCabinet, offerId: string): Promise<{ name: string; photos: string[] }> {
+    const found = await getOzonProductPhotos(cabinet, { offerId });
+    return { name: found.name, photos: found.photos };
 }

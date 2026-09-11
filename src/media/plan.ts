@@ -30,6 +30,7 @@ export interface Plan {
     cabinet: string | null;
     upload?: string;
     nmId?: number;
+    offerId?: string;
     photo?: number;
     imageUrl?: string;
     /** Что написано на картинке — чтобы повторить это в ответе и в журнале. */

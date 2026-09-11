@@ -473,6 +473,50 @@ export interface OzonChatMessage {
  * Их различает тип автора, и смешивать их в одну ленту нельзя — человек
  * будет искать вопрос покупателя среди рассылки.
  */
+/**
+ * Фотографии товара из карточки Ozon.
+ *
+ * Ozon не даёт списка картинок в общем перечне товаров — за ними надо идти
+ * отдельным запросом по артикулу или SKU. Первая в ответе помечена главной,
+ * и обычно именно она с инфографикой: для генерации нужна не она.
+ */
+export async function getOzonProductPhotos(
+    cabinet: OzonCabinet,
+    what: { offerId?: string; sku?: number }
+): Promise<{ name: string; offerId: string; photos: string[] }> {
+    const body: Record<string, unknown> = {};
+    if (what.offerId) body.offer_id = [what.offerId];
+    else if (what.sku) body.sku = [what.sku];
+    else throw new OzonApiError('нужен артикул продавца или SKU', 400, '/v3/product/info/list');
+
+    const raw = await post<{
+        items?: Array<{
+            name?: string;
+            offer_id?: string;
+            primary_image?: string | string[];
+            images?: Array<string | { file_name?: string }>;
+        }>;
+    }>(cabinet, '/v3/product/info/list', body);
+
+    const item = raw.items?.[0];
+    if (!item) throw new OzonApiError('товар не найден в этом кабинете', 404, '/v3/product/info/list');
+
+    // Поле приходит то строкой, то массивом, то объектами с file_name —
+    // формат менялся между версиями метода, поэтому разбираем все три.
+    const flat = (v: unknown): string[] => {
+        if (typeof v === 'string') return v ? [v] : [];
+        if (Array.isArray(v)) return v.flatMap(flat);
+        if (v && typeof v === 'object' && typeof (v as { file_name?: unknown }).file_name === 'string') {
+            return [(v as { file_name: string }).file_name];
+        }
+        return [];
+    };
+
+    const photos = [...new Set([...flat(item.primary_image), ...flat(item.images)])].filter(u => /^https?:\/\//.test(u));
+
+    return { name: item.name ?? '', offerId: item.offer_id ?? '', photos };
+}
+
 export async function getOzonChatHistory(
     cabinet: OzonCabinet,
     chatId: string,
