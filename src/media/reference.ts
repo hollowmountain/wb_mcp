@@ -14,6 +14,7 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 
+import { readUpload } from './uploads.js';
 import { getCardByNmId } from '../wb/api.js';
 import type { Cabinet } from '../wb/cabinets.js';
 
@@ -105,6 +106,8 @@ async function download(url: string): Promise<Reference> {
 }
 
 export interface ReferenceRequest {
+    /** Код своего снимка, загруженного в панели: ref-xxxxxx. */
+    upload?: string;
     nmId?: number;
     /** Номер снимка в карточке, считая с единицы. */
     photo?: number;
@@ -115,10 +118,34 @@ export interface ReferenceRequest {
  * Достаёт фото товара. При nmID берём ссылки из карточки Wildberries: там
  * лежат те же снимки, что видит покупатель, и гадать с адресами не нужно.
  */
-export async function resolveReference(cabinet: Cabinet | null, request: ReferenceRequest): Promise<Reference> {
+export async function resolveReference(
+    cabinet: Cabinet | null,
+    request: ReferenceRequest,
+    email?: string
+): Promise<Reference> {
+    // Свой снимок имеет приоритет: если человек его загрузил, значит он и
+    // считает его лучшим исходником, чем то, что лежит в карточке.
+    if (request.upload) {
+        if (!email) throw new ReferenceError_('Не удалось определить, чей это исходник.');
+        const found = readUpload(request.upload, email);
+        if (!found) {
+            throw new ReferenceError_(
+                `Исходник «${request.upload}» не найден или загружен не вами. ` +
+                    'Список своих — на странице /panel/reference.'
+            );
+        }
+        const ext = found.mime === 'image/png' ? 'png' : found.mime === 'image/webp' ? 'webp' : 'jpg';
+        return {
+            bytes: found.bytes,
+            mime: found.mime,
+            filename: `reference.${ext}`,
+            source: `свой снимок ${request.upload}${found.note ? ` — ${found.note}` : ''}`
+        };
+    }
+
     if (request.imageUrl) return download(request.imageUrl);
 
-    if (!request.nmId) throw new ReferenceError_('Нужен либо nmID товара, либо прямая ссылка на фото.');
+    if (!request.nmId) throw new ReferenceError_('Нужен свой исходник, nmID товара или прямая ссылка на фото.');
     if (!cabinet) throw new ReferenceError_('Чтобы найти фото по nmID, укажите кабинет Wildberries.');
 
     const card = await getCardByNmId(cabinet, request.nmId);

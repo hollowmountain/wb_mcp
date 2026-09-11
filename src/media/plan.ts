@@ -28,6 +28,7 @@ export interface Plan {
     prompt: string;
     /** Откуда брать фото товара. Саму картинку в план не кладём: она тяжёлая. */
     cabinet: string | null;
+    upload?: string;
     nmId?: number;
     photo?: number;
     imageUrl?: string;

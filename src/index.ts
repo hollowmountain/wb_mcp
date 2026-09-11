@@ -16,6 +16,7 @@ import { cleanupExpired } from './db/index.js';
 import { logger } from './logger.js';
 import { createMcpServer } from './mcp/server.js';
 import { prune as pruneMedia, read as readMedia } from './media/store.js';
+import { pruneUploads } from './media/uploads.js';
 import { panelRouter } from './panel/routes.js';
 import { completePanelLogin, purposeOfPending } from './panel/session.js';
 import { wbPing } from './wb/client.js';
@@ -169,6 +170,11 @@ setInterval(() => pruneAudit(), 24 * 60 * 60 * 1000).unref();
 // Картинки тяжёлые, а диск на сервере маленький: чистим по тому же расписанию.
 pruneMedia();
 setInterval(() => pruneMedia(), 24 * 60 * 60 * 1000).unref();
+
+// Загруженные исходники живут дольше результатов: съёмку кладут раз и
+// пользуются ей месяцами.
+pruneUploads();
+setInterval(() => pruneUploads(), 24 * 60 * 60 * 1000).unref();
 
 const server = app.listen(config.port, config.host, () => {
     logger.info(

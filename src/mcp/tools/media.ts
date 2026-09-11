@@ -9,6 +9,7 @@ import { describe as describeBudget, record as recordSpend, refuseIfOverLimit } 
 import { edit, estimateUsd, OpenAiError, type Quality } from '../../media/openai.js';
 import { decodePlan, encodePlan, planErrorText, type Plan } from '../../media/plan.js';
 import { listPhotos, ReferenceError_, resolveReference } from '../../media/reference.js';
+import { listUploads } from '../../media/uploads.js';
 import {
     buildPrompt,
     checkNeeds,
@@ -85,12 +86,12 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
         {
             title: 'Показать фотографии товара',
             description:
-                'Список снимков из карточки Wildberries со ссылками. Нужен, чтобы выбрать исходник: ' +
-                'первое фото в карточке почти всегда с инфографикой, а генерации нужен кадр с чистым товаром. ' +
-                'Покажите ссылки человеку и спросите, на каком снимке товар без наложенного текста.',
+                'Что можно взять за исходник: свои загруженные снимки и фотографии из карточки Wildberries. ' +
+                'Без nmId покажет только свои. Нужен, чтобы человек выбрал: первое фото в карточке почти всегда ' +
+                'с инфографикой, а генерации нужен кадр с чистым товаром.',
             inputSchema: {
-                nmId: z.number().int().positive().describe('Номенклатура Wildberries'),
-                cabinet: z.string().describe('Кабинет Wildberries')
+                nmId: z.number().int().positive().optional().describe('Номенклатура Wildberries'),
+                cabinet: z.string().optional().describe('Кабинет Wildberries')
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -99,17 +100,35 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             const no = denied(who);
             if (no) return fail(no);
 
+            const mine = listUploads(who.email);
+            const ownBlock =
+                mine.length === 0
+                    ? [
+                          'Своих снимков не загружено.',
+                          'Если у человека есть студийная съёмка товара — она лучше кадра из карточки.',
+                          'Загрузить можно на странице /panel/reference, оттуда вернётся код ref-xxxxxx.'
+                      ]
+                    : [
+                          `Свои снимки (${mine.length}), их можно назвать вместо кадра из карточки:`,
+                          ...mine.map(u => `   ${u.code} — ${u.note ?? 'без описания'}, ${Math.round(u.bytes / 1024)} КБ`)
+                      ];
+
+            if (!args.nmId) return text(ownBlock.join('\n'));
+            if (!args.cabinet) return fail('Чтобы показать фото из карточки, нужен кабинет Wildberries.');
+
             const cabinet = resolveCabinet(who, args.cabinet);
             const photos = await listPhotos(cabinet, args.nmId);
             if (photos.length === 0) return fail(`У товара nmID ${args.nmId} в карточке нет фотографий.`);
 
             return text(
                 [
+                    ...ownBlock,
+                    '',
                     `Фотографий в карточке: ${photos.length}`,
                     ...photos.map((url, i) => `${i + 1}. ${url}`),
                     '',
-                    'Для генерации нужен номер кадра, где товар снят без наложенного текста и без подтёков поверх букв.',
-                    'Этот номер передаётся в media_plan параметром photo.'
+                    'Для генерации нужен кадр, где товар снят без наложенного текста и без подтёков поверх букв.',
+                    'Номер кадра передаётся в media_plan параметром photo.'
                 ].join('\n')
             );
         })
@@ -139,6 +158,10 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                         'Обстановка вокруг товара, по-русски и подробно: где стоит, что рядом, какой свет, ' +
                             'какое настроение. Короткое описание даёт случайный результат.'
                     ),
+                upload: z
+                    .string()
+                    .optional()
+                    .describe('Код своего снимка, загруженного в панели: ref-xxxxxx. Предпочтительнее кадра из карточки.'),
                 nmId: z.number().int().positive().optional().describe('Товар на Wildberries — фото возьмётся из его карточки'),
                 photo: z.number().int().positive().optional().describe('Номер фото в карточке, по умолчанию первое'),
                 imageUrl: z
@@ -166,8 +189,12 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             const no = denied(who);
             if (no) return fail(no);
 
-            if (!args.nmId && !args.imageUrl) {
-                return fail('Нужно исходное фото товара: укажите nmId (и кабинет) либо imageUrl.');
+            if (!args.upload && !args.nmId && !args.imageUrl) {
+                return fail(
+                    'Нужно исходное фото товара. Спросите у человека, что берём: его собственный снимок ' +
+                        '(тогда пусть загрузит на странице /panel/reference и назовёт код ref-xxxxxx) ' +
+                        'или кадр из карточки площадки (тогда нужен nmId и кабинет).'
+                );
             }
 
             const overlay = overlayOf(args);
@@ -199,11 +226,16 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             const cabinet = args.cabinet ? resolveCabinet(who, args.cabinet) : null;
             let source: string;
             try {
-                const reference = await resolveReference(cabinet, {
-                    ...(args.nmId ? { nmId: args.nmId } : {}),
-                    ...(args.photo ? { photo: args.photo } : {}),
-                    ...(args.imageUrl ? { imageUrl: args.imageUrl } : {})
-                });
+                const reference = await resolveReference(
+                    cabinet,
+                    {
+                        ...(args.upload ? { upload: args.upload } : {}),
+                        ...(args.nmId ? { nmId: args.nmId } : {}),
+                        ...(args.photo ? { photo: args.photo } : {}),
+                        ...(args.imageUrl ? { imageUrl: args.imageUrl } : {})
+                    },
+                    who.email
+                );
                 source = reference.source;
             } catch (e) {
                 return fail(explain(e));
@@ -215,6 +247,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                 quality: args.quality as Quality,
                 prompt,
                 cabinet: args.cabinet ?? null,
+                ...(args.upload ? { upload: args.upload } : {}),
                 ...(args.nmId ? { nmId: args.nmId } : {}),
                 ...(args.photo ? { photo: args.photo } : {}),
                 ...(args.imageUrl ? { imageUrl: args.imageUrl } : {}),
@@ -272,11 +305,16 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
 
             try {
                 const cabinet = plan.cabinet ? resolveCabinet(who, plan.cabinet) : null;
-                const reference = await resolveReference(cabinet, {
-                    ...(plan.nmId ? { nmId: plan.nmId } : {}),
-                    ...(plan.photo ? { photo: plan.photo } : {}),
-                    ...(plan.imageUrl ? { imageUrl: plan.imageUrl } : {})
-                });
+                const reference = await resolveReference(
+                    cabinet,
+                    {
+                        ...(plan.upload ? { upload: plan.upload } : {}),
+                        ...(plan.nmId ? { nmId: plan.nmId } : {}),
+                        ...(plan.photo ? { photo: plan.photo } : {}),
+                        ...(plan.imageUrl ? { imageUrl: plan.imageUrl } : {})
+                    },
+                    who.email
+                );
 
                 const result = await edit(config.media, {
                     reference,
