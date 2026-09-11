@@ -41,6 +41,11 @@ const schema = z.object({
     REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(2592000),
     NEPSELL_TOKEN: z.string().default(''),
 
+    OPENAI_API_KEY: z.string().default(''),
+    MEDIA_DIR: z.string().default('./data/media'),
+    MEDIA_DAILY_USD: z.coerce.number().positive().default(3),
+    MEDIA_MONTHLY_USD: z.coerce.number().positive().default(25),
+
     ONEC_BASE_URL: z.string().default(''),
     ONEC_USER: z.string().default(''),
     ONEC_PASSWORD: z.string().default(''),
@@ -179,12 +184,16 @@ export const config = {
     /** Пустой токен — Nepsell выключен, инструменты не появляются ни у кого. */
     nepsell: { token: env.NEPSELL_TOKEN },
     /**
-     * Генерация картинок и видео. Ключ выдаётся парой; нет пары — раздела
-     * нет вовсе, как у Nepsell и 1С.
+     * Генерация картинок для карточек. Пустой ключ — инструментов нет ни у
+     * кого, как у Nepsell и 1С. Пределы трат стоят на человека в день и в
+     * месяц: область media закрыта по умолчанию, но одного разрешения мало —
+     * подбирая сцену, можно незаметно нащёлкать на лишние деньги.
      */
-    higgsfield: {
-        keyId: (process.env.HIGGSFIELD_KEY_ID ?? '').trim(),
-        keySecret: (process.env.HIGGSFIELD_KEY_SECRET ?? '').trim()
+    media: {
+        apiKey: env.OPENAI_API_KEY.trim(),
+        dir: env.MEDIA_DIR,
+        dailyUsd: env.MEDIA_DAILY_USD,
+        monthlyUsd: env.MEDIA_MONTHLY_USD
     },
     /** Пустой адрес — 1С выключена. */
     onec: {

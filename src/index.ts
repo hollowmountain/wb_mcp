@@ -15,6 +15,7 @@ import { config } from './config.js';
 import { cleanupExpired } from './db/index.js';
 import { logger } from './logger.js';
 import { createMcpServer } from './mcp/server.js';
+import { prune as pruneMedia, read as readMedia } from './media/store.js';
 import { panelRouter } from './panel/routes.js';
 import { completePanelLogin, purposeOfPending } from './panel/session.js';
 import { wbPing } from './wb/client.js';
@@ -123,6 +124,22 @@ const methodNotAllowed = (_req: express.Request, res: express.Response): void =>
 app.get('/mcp', requireAuth, methodNotAllowed);
 app.delete('/mcp', requireAuth, methodNotAllowed);
 
+// ─── Готовые картинки ────────────────────────────────────────────────────────
+// Без входа в панель, но по подписанной ссылке: менеджер открывает её прямо
+// из переписки, а перебором чужую карточку до публикации не достать.
+app.get('/media/:id', (req, res) => {
+    const signature = typeof req.query.s === 'string' ? req.query.s : '';
+    const found = readMedia(req.params.id, signature);
+    if (!found) {
+        res.status(404).type('text/plain; charset=utf-8').send('Картинка не найдена или ссылка устарела.');
+        return;
+    }
+    res.type(found.mime)
+        .set('Cache-Control', 'private, max-age=86400')
+        .set('Content-Disposition', `inline; filename="${req.params.id}"`)
+        .send(found.bytes);
+});
+
 // ─── Служебное ───────────────────────────────────────────────────────────────
 app.get('/healthz', (_req, res) => {
     res.json({ ok: true });
@@ -148,6 +165,10 @@ setInterval(cleanupExpired, 10 * 60 * 1000).unref();
 // перезапускали, чистка всё равно случится.
 pruneAudit();
 setInterval(() => pruneAudit(), 24 * 60 * 60 * 1000).unref();
+
+// Картинки тяжёлые, а диск на сервере маленький: чистим по тому же расписанию.
+pruneMedia();
+setInterval(() => pruneMedia(), 24 * 60 * 60 * 1000).unref();
 
 const server = app.listen(config.port, config.host, () => {
     logger.info(
