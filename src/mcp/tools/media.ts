@@ -1,7 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import { resolveCabinet, resolveOzonCabinet } from '../../access.js';
 import type { Actor } from '../../auth/provider.js';
 import { inArea } from '../../auth/provider.js';
 import { config } from '../../config.js';
@@ -9,8 +8,7 @@ import { describe as describeBudget, record as recordSpend, refuseIfOverLimit } 
 import { buildPrompt, checkTexts, describeRules, SIZES, type SizeKey } from '../../media/compose.js';
 import { edit, estimateUsd, OpenAiError, type Quality } from '../../media/openai.js';
 import { decodePlan, encodePlan, planErrorText, type Plan } from '../../media/plan.js';
-import { listOzonPhotos, listPhotos, ReferenceError_, resolveReference } from '../../media/reference.js';
-import { findUploads, listUploads } from '../../media/uploads.js';
+import { findUploads, listUploads, readUpload } from '../../media/uploads.js';
 import { makeUploadLink } from '../../media/uploadlink.js';
 import { save } from '../../media/store.js';
 import { actorOf, fail, guarded, text } from './common.js';
@@ -29,13 +27,7 @@ function denied(actor: Actor): string | null {
 }
 
 const explain = (e: unknown): string =>
-    e instanceof OpenAiError
-        ? e.toUserMessage()
-        : e instanceof ReferenceError_
-          ? e.message
-          : e instanceof Error
-            ? e.message
-            : String(e);
+    e instanceof OpenAiError ? e.toUserMessage() : e instanceof Error ? e.message : String(e);
 
 export function registerMediaTools(server: McpServer, actor: Actor): void {
     if (!available(actor)) return;
@@ -94,19 +86,14 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
     server.registerTool(
         'media_photos',
         {
-            title: 'Найти исходное фото товара',
+            title: 'Мои загруженные снимки',
             description:
-                'Что можно взять за исходник. Без параметров — свои загруженные снимки. ' +
-                'С find — поиск среди них по названию. С nmId или offerId — фотографии из карточки площадки. ' +
-                'Нужен, чтобы человек выбрал кадр: первое фото в карточке почти всегда с инфографикой, ' +
-                'а генерации нужен чистый товар.',
+                'Что человек загрузил и можно взять за исходник. Без параметров — всё, с find — поиск ' +
+                'по названию. Если пусто, дайте ссылку через media_upload_link.',
             inputSchema: {
-                find: z.string().optional().describe('Часть названия своего снимка, например «ланолин»'),
-                nmId: z.number().int().positive().optional().describe('Номенклатура Wildberries'),
-                offerId: z.string().optional().describe('Артикул продавца на Ozon'),
-                cabinet: z.string().optional().describe('Кабинет: harbez для Wildberries, oz-harbez для Ozon')
+                find: z.string().optional().describe('Часть названия снимка, например «ланолин»')
             },
-            annotations: { readOnlyHint: true, openWorldHint: true }
+            annotations: { readOnlyHint: true, openWorldHint: false }
         },
         guarded('media_photos', async (args, extra) => {
             const who = actorOf(extra);
@@ -114,54 +101,23 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             if (no) return fail(no);
 
             const mine = args.find ? findUploads(who.email, args.find) : listUploads(who.email);
-            const ownBlock =
-                mine.length === 0
-                    ? args.find
-                        ? [`Своих снимков по запросу «${args.find}» не нашлось.`]
-                        : [
-                              'Своих снимков не загружено.',
-                              'Если у человека есть студийная съёмка товара — она лучше кадра из карточки.',
-                              'Дайте ему ссылку на загрузку через media_upload_link: входить никуда не нужно.'
-                          ]
-                    : [
-                          `Свои снимки (${mine.length}) — их можно назвать вместо кадра из карточки:`,
-                          ...mine.map(u => `   ${u.code} — ${u.note ?? 'без описания'}, ${Math.round(u.bytes / 1024)} КБ`)
-                      ];
-
-            if (args.offerId) {
-                if (!args.cabinet) return fail('Чтобы показать фото из карточки Ozon, нужен кабинет вида oz-harbez.');
-                const ozon = resolveOzonCabinet(who, args.cabinet);
-                const found = await listOzonPhotos(ozon, args.offerId);
-                if (found.photos.length === 0) return fail(`У товара «${args.offerId}» в карточке Ozon нет фотографий.`);
+            if (mine.length === 0) {
                 return text(
-                    [
-                        ...ownBlock,
-                        '',
-                        `${found.name || args.offerId} — фотографий в карточке Ozon: ${found.photos.length}`,
-                        ...found.photos.map((url, i) => `${i + 1}. ${url}`),
-                        '',
-                        'ПОКАЖИТЕ ЭТОТ СПИСОК ЧЕЛОВЕКУ и спросите, какой кадр брать: нужен тот, где товар снят',
-                        'без наложенной инфографики. Первый обычно главный и как раз с надписями.'
-                    ].join('\n')
+                    args.find
+                        ? `Снимков по запросу «${args.find}» не нашлось. Покажите весь список или дайте ссылку на загрузку.`
+                        : [
+                              'Снимков не загружено.',
+                              'Дайте человеку ссылку через media_upload_link — входить никуда не нужно.'
+                          ].join('\n')
                 );
             }
 
-            if (!args.nmId) return text(ownBlock.join('\n'));
-            if (!args.cabinet) return fail('Чтобы показать фото из карточки, нужен кабинет Wildberries.');
-
-            const cabinet = resolveCabinet(who, args.cabinet);
-            const photos = await listPhotos(cabinet, args.nmId);
-            if (photos.length === 0) return fail(`У товара nmID ${args.nmId} в карточке нет фотографий.`);
-
             return text(
                 [
-                    ...ownBlock,
+                    `Загружено снимков: ${mine.length}`,
+                    ...mine.map(u => `   ${u.code} — ${u.note ?? 'без описания'}, ${Math.round(u.bytes / 1024)} КБ`),
                     '',
-                    `Фотографий в карточке: ${photos.length}`,
-                    ...photos.map((url, i) => `${i + 1}. ${url}`),
-                    '',
-                    'ПОКАЖИТЕ ЭТОТ СПИСОК ЧЕЛОВЕКУ и спросите, какой кадр брать: нужен тот, где товар снят',
-                    'без наложенного текста и без подтёков поверх букв. Первое фото обычно с инфографикой.'
+                    'Нужный код передаётся в media_plan параметром upload.'
                 ].join('\n')
             );
         })
@@ -193,12 +149,9 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                         'Надписи, которые лягут поверх картинки, по одной строке. Именно они проверяются на запреты ' +
                             'площадок. Пусто — картинка без текста.'
                     ),
-                upload: z.string().optional().describe('Код своего снимка: ref-xxxxxx'),
-                nmId: z.number().int().positive().optional().describe('Товар на Wildberries'),
-                offerId: z.string().optional().describe('Артикул продавца на Ozon'),
-                photo: z.number().int().positive().optional().describe('Номер фото в карточке, по умолчанию первое'),
-                imageUrl: z.string().optional().describe('Прямая ссылка на фото с витрины WB или Ozon'),
-                cabinet: z.string().optional().describe('Кабинет: harbez для Wildberries, oz-harbez для Ozon'),
+                upload: z
+                    .string()
+                    .describe('Код загруженного снимка: ref-xxxxxx. Список — в media_photos.'),
                 size: z
                     .enum(Object.keys(SIZES) as [SizeKey, ...SizeKey[]])
                     .default('wb')
@@ -214,14 +167,6 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             const who = actorOf(extra);
             const no = denied(who);
             if (no) return fail(no);
-
-            if (!args.upload && !args.nmId && !args.offerId && !args.imageUrl) {
-                return fail(
-                    'Нужно исходное фото товара. Спросите у человека, что берём: его собственный снимок ' +
-                        '(код ref-xxxxxx, найти можно через media_photos) или кадр из карточки площадки ' +
-                        '(nmId и кабинет для Wildberries, offerId и кабинет oz- для Ozon).'
-                );
-            }
 
             const texts = (args.texts ?? []).map(t => t.trim()).filter(Boolean);
 
@@ -239,40 +184,22 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             const overLimit = refuseIfOverLimit(who.email, estUsd);
             if (overLimit) return fail(overLimit);
 
-            // Фото достаём уже сейчас: пусть ошибка «нет такого товара»
-            // придёт до согласования, а не после «да».
-            const isOzon = Boolean(args.offerId);
-            const cabinet = args.cabinet && !isOzon ? resolveCabinet(who, args.cabinet) : null;
-            const ozon = args.cabinet && isOzon ? resolveOzonCabinet(who, args.cabinet) : null;
-            let source: string;
-            try {
-                const reference = await resolveReference(
-                    cabinet,
-                    {
-                        ...(args.upload ? { upload: args.upload } : {}),
-                        ...(args.nmId ? { nmId: args.nmId } : {}),
-                        ...(args.offerId ? { offerId: args.offerId } : {}),
-                        ...(args.photo ? { photo: args.photo } : {}),
-                        ...(args.imageUrl ? { imageUrl: args.imageUrl } : {})
-                    },
-                    who.email,
-                    ozon
+            // Снимок проверяем уже сейчас: пусть «нет такого кода» придёт до
+            // согласования, а не после «да».
+            const found = readUpload(args.upload, who.email);
+            if (!found) {
+                return fail(
+                    `Снимок «${args.upload}» не найден или загружен не вами. Он мог устареть — они живут час. ` +
+                        'Посмотрите список через media_photos или дайте новую ссылку через media_upload_link.'
                 );
-                source = reference.source;
-            } catch (e) {
-                return fail(explain(e));
             }
+            const source = `свой снимок ${args.upload}${found.note ? ` — ${found.note}` : ''}`;
 
             const plan: Plan = {
                 size: args.size as SizeKey,
                 quality: args.quality as Quality,
                 prompt,
-                cabinet: args.cabinet ?? null,
-                ...(args.upload ? { upload: args.upload } : {}),
-                ...(args.nmId ? { nmId: args.nmId } : {}),
-                ...(args.offerId ? { offerId: args.offerId } : {}),
-                ...(args.photo ? { photo: args.photo } : {}),
-                ...(args.imageUrl ? { imageUrl: args.imageUrl } : {}),
+                upload: args.upload,
                 texts,
                 estUsd,
                 email: who.email,
@@ -324,25 +251,17 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
 
             const size = SIZES[plan.size];
 
-            try {
-                const planIsOzon = Boolean(plan.offerId);
-                const cabinet = plan.cabinet && !planIsOzon ? resolveCabinet(who, plan.cabinet) : null;
-                const ozon = plan.cabinet && planIsOzon ? resolveOzonCabinet(who, plan.cabinet) : null;
-                const reference = await resolveReference(
-                    cabinet,
-                    {
-                        ...(plan.upload ? { upload: plan.upload } : {}),
-                        ...(plan.nmId ? { nmId: plan.nmId } : {}),
-                        ...(plan.offerId ? { offerId: plan.offerId } : {}),
-                        ...(plan.photo ? { photo: plan.photo } : {}),
-                        ...(plan.imageUrl ? { imageUrl: plan.imageUrl } : {})
-                    },
-                    who.email,
-                    ozon
+            const found = readUpload(plan.upload, who.email);
+            if (!found) {
+                return fail(
+                    'Снимок больше недоступен — они живут час. Загрузите заново через media_upload_link и соберите план снова.'
                 );
+            }
+            const ext = found.mime === 'image/png' ? 'png' : found.mime === 'image/webp' ? 'webp' : 'jpg';
 
+            try {
                 const result = await edit(config.media, {
-                    reference,
+                    reference: { bytes: found.bytes, mime: found.mime, filename: `reference.${ext}` },
                     prompt: plan.prompt,
                     width: size.width,
                     height: size.height,
