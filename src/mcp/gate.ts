@@ -96,6 +96,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     // а себестоимость и прибыль ему не нужны.
     ozon_ads: 'ads',
     media_rules: 'media',
+    media_upload_link: 'media',
     media_photos: 'media',
     media_plan: 'media',
     media_generate: 'media'

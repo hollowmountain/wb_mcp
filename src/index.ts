@@ -16,7 +16,9 @@ import { cleanupExpired } from './db/index.js';
 import { logger } from './logger.js';
 import { createMcpServer } from './mcp/server.js';
 import { prune as pruneMedia, read as readMedia } from './media/store.js';
+import { saveUpload, UploadError } from './media/uploads.js';
 import { pruneUploads } from './media/uploads.js';
+import { emailFromLink, linkErrorText } from './media/uploadlink.js';
 import { panelRouter } from './panel/routes.js';
 import { completePanelLogin, purposeOfPending } from './panel/session.js';
 import { wbPing } from './wb/client.js';
@@ -141,6 +143,37 @@ app.get('/media/:id', (req, res) => {
         .send(found.bytes);
 });
 
+// ─── Загрузка своего фото по ссылке из чата ──────────────────────────────────
+// Входа в панель здесь нет намеренно: человек уже опознан коннектором, а
+// ссылка сама несёт подписанную почту и срок. Барьер с кодом убран — он
+// стоил менеджеру больше, чем давал.
+app.get('/u/:token', (req, res) => {
+    const who = emailFromLink(req.params.token);
+    if (who === 'битая' || who === 'подделана' || who === 'просрочена') {
+        res.status(410).type('html').send(uploadPage(null, linkErrorText(who)));
+        return;
+    }
+    res.type('html').send(uploadPage(req.params.token, null));
+});
+
+app.post('/u/:token', express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '25mb' }), (req, res) => {
+    const who = emailFromLink(req.params.token);
+    if (who === 'битая' || who === 'подделана' || who === 'просрочена') {
+        res.status(410).json({ error: linkErrorText(who) });
+        return;
+    }
+    try {
+        const mime = (req.headers['content-type'] ?? '').split(';')[0]?.trim() ?? '';
+        const note = typeof req.query.note === 'string' ? req.query.note.slice(0, 120) : undefined;
+        const upload = saveUpload(who, req.body as Buffer, mime, note);
+        res.json({ code: upload.code });
+    } catch (e) {
+        const message = e instanceof UploadError ? e.message : 'Не удалось сохранить файл.';
+        if (!(e instanceof UploadError)) logger.error({ err: e }, 'upload failed');
+        res.status(400).json({ error: message });
+    }
+});
+
 // ─── Служебное ───────────────────────────────────────────────────────────────
 app.get('/healthz', (_req, res) => {
     res.json({ ok: true });
@@ -171,10 +204,60 @@ setInterval(() => pruneAudit(), 24 * 60 * 60 * 1000).unref();
 pruneMedia();
 setInterval(() => pruneMedia(), 24 * 60 * 60 * 1000).unref();
 
-// Загруженные исходники живут дольше результатов: съёмку кладут раз и
-// пользуются ей месяцами.
+// Исходники живут час, поэтому и убирать их надо часто: раз в сутки
+// означало бы, что файл лежит на диске ещё сутки после того, как протух.
 pruneUploads();
-setInterval(() => pruneUploads(), 24 * 60 * 60 * 1000).unref();
+setInterval(() => pruneUploads(), 10 * 60 * 1000).unref();
+
+/** Страница загрузки: одна кнопка, одна подпись, никакого входа. */
+function uploadPage(token: string | null, error: string | null): string {
+    const head = `<!doctype html><html lang="ru"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Фото товара</title>
+<style>
+  body { font: 17px/1.55 system-ui, sans-serif; max-width: 32rem; margin: 3rem auto; padding: 0 1.2rem; color: #1b1f2a; }
+  h1 { font-size: 1.5rem; margin: 0 0 .4rem; }
+  p.lead { color: #5a5f6e; margin-top: 0; }
+  .drop { border: 2px dashed #c9cfdb; border-radius: 8px; padding: 2.2rem 1rem; text-align: center; background: #fafbfd; }
+  input[type=text] { width: 100%; padding: .6rem; border: 1px solid #c9cfdb; border-radius: 6px; font: inherit; margin-top: .3rem; }
+  label { display: block; margin-top: 1.1rem; font-size: .92rem; color: #5a5f6e; }
+  .ok { background: #eefaf0; border: 1px solid #b7e2c0; padding: .9rem 1rem; border-radius: 7px; margin-top: 1.1rem; }
+  .err { background: #fdeeee; border: 1px solid #f0bcbc; padding: .9rem 1rem; border-radius: 7px; margin-top: 1.1rem; }
+  .note { color: #8a8f9c; font-size: .88rem; margin-top: 1.6rem; }
+</style>`;
+
+    if (error) return `${head}<h1>Ссылка не работает</h1><div class="err">${error}</div></html>`;
+
+    return `${head}
+<h1>Фото товара</h1>
+<p class="lead">Выберите снимок — и возвращайтесь в чат, там уже можно продолжать.</p>
+<div class="drop">
+  <div>JPEG, PNG или WebP, до 25 МБ</div>
+  <input type="file" id="file" accept="image/jpeg,image/png,image/webp" style="margin-top:.8rem">
+</div>
+<label for="note">Что это за товар</label>
+<input type="text" id="note" placeholder="Ланолин 50 г, съёмка на белом" maxlength="120">
+<div id="out"></div>
+<p class="note">Снимок хранится час и удаляется сам. Фото с айфона в формате HEIC не принимается — сохраните как JPEG.</p>
+<script>
+  const f = document.getElementById('file'), n = document.getElementById('note'), o = document.getElementById('out');
+  f.addEventListener('change', async () => {
+    const file = f.files && f.files[0];
+    if (!file) return;
+    o.innerHTML = '<div class="ok">Загружаю…</div>';
+    try {
+      const url = location.pathname + (n.value ? '?note=' + encodeURIComponent(n.value) : '');
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': file.type }, body: file });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'не получилось');
+      o.innerHTML = '<div class="ok"><b>Готово.</b> Вернитесь в чат и скажите, что загрузили — фото уже там.</div>';
+    } catch (e) {
+      o.innerHTML = '<div class="err">' + (e && e.message ? e.message : 'Не удалось загрузить') + '</div>';
+    }
+  });
+</script>
+</html>`;
+}
 
 const server = app.listen(config.port, config.host, () => {
     logger.info(

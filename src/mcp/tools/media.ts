@@ -11,6 +11,7 @@ import { edit, estimateUsd, OpenAiError, type Quality } from '../../media/openai
 import { decodePlan, encodePlan, planErrorText, type Plan } from '../../media/plan.js';
 import { listOzonPhotos, listPhotos, ReferenceError_, resolveReference } from '../../media/reference.js';
 import { findUploads, listUploads } from '../../media/uploads.js';
+import { makeUploadLink } from '../../media/uploadlink.js';
 import { save } from '../../media/store.js';
 import { actorOf, fail, guarded, text } from './common.js';
 
@@ -58,6 +59,39 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
     );
 
     server.registerTool(
+        'media_upload_link',
+        {
+            title: 'Ссылка, куда человек скинет своё фото',
+            description:
+                'Возвращает короткую ссылку: человек открывает её, перетаскивает снимок и возвращается в чат. ' +
+                'Входа и кодов не требует — ссылка уже его. Нужна, когда у человека есть своя съёмка товара ' +
+                'или когда товара ещё нет на площадке. Ничего не тратит.',
+            inputSchema: {},
+            annotations: { readOnlyHint: true, openWorldHint: false }
+        },
+        guarded('media_upload_link', async (_args, extra) => {
+            const who = actorOf(extra);
+            const no = denied(who);
+            if (no) return fail(no);
+
+            const link = makeUploadLink(who.email);
+            return text(
+                [
+                    'Дайте человеку эту ссылку:',
+                    link.url,
+                    '',
+                    `Ссылка живёт ${link.minutes} минут и работает только у него — входить никуда не нужно.`,
+                    'Пусть выберет файл и подпишет одной строкой, что это за товар.',
+                    'Принимаются JPEG, PNG и WebP. Фото с айфона в HEIC не подойдёт, его надо сохранить как JPEG.',
+                    'Загруженный снимок хранится час и удаляется сам.',
+                    '',
+                    'Когда человек скажет, что загрузил, — вызовите media_photos и увидите его снимок.'
+                ].join('\n')
+            );
+        })
+    );
+
+    server.registerTool(
         'media_photos',
         {
             title: 'Найти исходное фото товара',
@@ -87,7 +121,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                         : [
                               'Своих снимков не загружено.',
                               'Если у человека есть студийная съёмка товара — она лучше кадра из карточки.',
-                              'Загрузить можно на странице /panel/reference, оттуда вернётся код ref-xxxxxx.'
+                              'Дайте ему ссылку на загрузку через media_upload_link: входить никуда не нужно.'
                           ]
                     : [
                           `Свои снимки (${mine.length}) — их можно назвать вместо кадра из карточки:`,
