@@ -95,7 +95,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     // Реклама Ozon — своя область: расход и ДРР нужны менеджеру площадки,
     // а себестоимость и прибыль ему не нужны.
     ozon_ads: 'ads',
-    media_template: 'media',
+    media_rules: 'media',
     media_photos: 'media',
     media_plan: 'media',
     media_generate: 'media'

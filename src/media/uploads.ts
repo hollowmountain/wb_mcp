@@ -118,6 +118,22 @@ export function listUploads(email: string, limit = 20): Upload[] {
         });
 }
 
+/**
+ * Найти свой исходник по куску названия или кода.
+ *
+ * Человек помнит «то фото ланолина», а не ref-jjbf4d. Поэтому ищем по
+ * подписи, которую он сам оставил при загрузке, и по коду заодно.
+ */
+export function findUploads(email: string, query: string, limit = 5): Upload[] {
+    // Фильтруем в JS, а не запросом: lower() в SQLite приводит только латиницу,
+    // и поиск по русскому названию молча не находил ничего.
+    const q = query.trim().toLowerCase();
+    if (!q) return listUploads(email, limit);
+    return listUploads(email, 100)
+        .filter(u => (u.note ?? '').toLowerCase().includes(q) || u.code.includes(q))
+        .slice(0, limit);
+}
+
 /** Уборка: файл и запись о нём уходят вместе, иначе код будет числиться живым. */
 export function pruneUploads(): number {
     let removed = 0;

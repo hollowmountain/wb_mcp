@@ -6,22 +6,11 @@ import type { Actor } from '../../auth/provider.js';
 import { inArea } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { describe as describeBudget, record as recordSpend, refuseIfOverLimit } from '../../media/budget.js';
+import { buildPrompt, checkTexts, describeRules, SIZES, type SizeKey } from '../../media/compose.js';
 import { edit, estimateUsd, OpenAiError, type Quality } from '../../media/openai.js';
 import { decodePlan, encodePlan, planErrorText, type Plan } from '../../media/plan.js';
 import { listOzonPhotos, listPhotos, ReferenceError_, resolveReference } from '../../media/reference.js';
-import { listUploads } from '../../media/uploads.js';
-import {
-    buildPrompt,
-    checkNeeds,
-    checkOverlay,
-    describeTemplate,
-    SIZES,
-    SLOT_RULES,
-    SLOTS,
-    type Overlay,
-    type SizeKey,
-    type Slot
-} from '../../media/slots.js';
+import { findUploads, listUploads } from '../../media/uploads.js';
 import { save } from '../../media/store.js';
 import { actorOf, fail, guarded, text } from './common.js';
 
@@ -47,55 +36,41 @@ const explain = (e: unknown): string =>
             ? e.message
             : String(e);
 
-const overlayOf = (args: {
-    headline?: string;
-    bullets?: string[];
-    badge?: string;
-    footer?: string;
-}): Overlay => ({
-    ...(args.headline?.trim() ? { headline: args.headline.trim() } : {}),
-    ...(args.bullets?.length ? { bullets: args.bullets.map(b => b.trim()).filter(Boolean) } : {}),
-    ...(args.badge?.trim() ? { badge: args.badge.trim() } : {}),
-    ...(args.footer?.trim() ? { footer: args.footer.trim() } : {})
-});
-
 export function registerMediaTools(server: McpServer, actor: Actor): void {
     if (!available(actor)) return;
 
     server.registerTool(
-        'media_template',
+        'media_rules',
         {
-            title: 'Шаблон карточки: порядок слайдов и правила площадок',
+            title: 'Правила площадок, форматы и остаток',
             description:
-                'Из каких слайдов состоит карточка, в каком порядке они идут, сколько на каждом текста, ' +
-                'какие размеры и что запрещено писать на картинке. Вызовите первым, если делаете карточку ' +
-                'целиком, а не один кадр. Ничего не генерирует и денег не тратит.',
+                'Что запрещено писать на картинке, какие есть размеры и сколько потрачено из предела. ' +
+                'Шаблона карточки нет: сцену и надписи придумываете вы с человеком. Ничего не тратит.',
             inputSchema: {},
             annotations: { readOnlyHint: true, openWorldHint: false }
         },
-        guarded('media_template', async (_args, extra) => {
+        guarded('media_rules', async (_args, extra) => {
             const who = actorOf(extra);
             const no = denied(who);
             if (no) return fail(no);
-            return text([describeTemplate(), '', describeBudget(who.email)].join('\n'));
+            return text([describeRules(), '', describeBudget(who.email)].join('\n'));
         })
     );
 
     server.registerTool(
         'media_photos',
         {
-            title: 'Показать фотографии товара',
+            title: 'Найти исходное фото товара',
             description:
-                'Что можно взять за исходник: свои загруженные снимки и фотографии из карточки Wildberries. ' +
-                'Без nmId покажет только свои. Нужен, чтобы человек выбрал: первое фото в карточке почти всегда ' +
-                'с инфографикой, а генерации нужен кадр с чистым товаром.',
+                'Что можно взять за исходник. Без параметров — свои загруженные снимки. ' +
+                'С find — поиск среди них по названию. С nmId или offerId — фотографии из карточки площадки. ' +
+                'Нужен, чтобы человек выбрал кадр: первое фото в карточке почти всегда с инфографикой, ' +
+                'а генерации нужен чистый товар.',
             inputSchema: {
+                find: z.string().optional().describe('Часть названия своего снимка, например «ланолин»'),
                 nmId: z.number().int().positive().optional().describe('Номенклатура Wildberries'),
                 offerId: z.string().optional().describe('Артикул продавца на Ozon'),
-                cabinet: z
-                    .string()
-                    .optional()
-                    .describe('Кабинет: harbez для Wildberries, oz-harbez для Ozon')
+                cabinet: z.string().optional().describe('Кабинет: harbez для Wildberries, oz-harbez для Ozon')
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -104,16 +79,18 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             const no = denied(who);
             if (no) return fail(no);
 
-            const mine = listUploads(who.email);
+            const mine = args.find ? findUploads(who.email, args.find) : listUploads(who.email);
             const ownBlock =
                 mine.length === 0
-                    ? [
-                          'Своих снимков не загружено.',
-                          'Если у человека есть студийная съёмка товара — она лучше кадра из карточки.',
-                          'Загрузить можно на странице /panel/reference, оттуда вернётся код ref-xxxxxx.'
-                      ]
+                    ? args.find
+                        ? [`Своих снимков по запросу «${args.find}» не нашлось.`]
+                        : [
+                              'Своих снимков не загружено.',
+                              'Если у человека есть студийная съёмка товара — она лучше кадра из карточки.',
+                              'Загрузить можно на странице /panel/reference, оттуда вернётся код ref-xxxxxx.'
+                          ]
                     : [
-                          `Свои снимки (${mine.length}), их можно назвать вместо кадра из карточки:`,
+                          `Свои снимки (${mine.length}) — их можно назвать вместо кадра из карточки:`,
                           ...mine.map(u => `   ${u.code} — ${u.note ?? 'без описания'}, ${Math.round(u.bytes / 1024)} КБ`)
                       ];
 
@@ -130,8 +107,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                         ...found.photos.map((url, i) => `${i + 1}. ${url}`),
                         '',
                         'ПОКАЖИТЕ ЭТОТ СПИСОК ЧЕЛОВЕКУ и спросите, какой кадр брать: нужен тот, где товар снят',
-                        'без наложенной инфографики. Первый обычно главный и как раз с надписями.',
-                        'Номер кадра передаётся в media_plan параметром photo вместе с offerId.'
+                        'без наложенной инфографики. Первый обычно главный и как раз с надписями.'
                     ].join('\n')
                 );
             }
@@ -151,8 +127,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                     ...photos.map((url, i) => `${i + 1}. ${url}`),
                     '',
                     'ПОКАЖИТЕ ЭТОТ СПИСОК ЧЕЛОВЕКУ и спросите, какой кадр брать: нужен тот, где товар снят',
-                    'без наложенного текста и без подтёков поверх букв. Первое фото обычно с инфографикой.',
-                    'Номер кадра передаётся в media_plan параметром photo.'
+                    'без наложенного текста и без подтёков поверх букв. Первое фото обычно с инфографикой.'
                 ].join('\n')
             );
         })
@@ -163,41 +138,33 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
         {
             title: 'Согласовать кадр перед запуском',
             description:
-                'Первый шаг генерации. Собирает промт по шаблону, проверяет тексты на запреты площадок, ' +
-                'считает примерную цену и возвращает план — подписанную строку. План надо ПОКАЗАТЬ ЧЕЛОВЕКУ ' +
-                'вместе с промтом и ценой и дождаться прямого «да». Ничего не генерирует и денег не тратит. ' +
-                'Сцену описывайте по-русски, тексты давайте отдельными полями — промт соберётся сам.',
+                'Первый шаг. Собирает запрос, проверяет надписи на запреты площадок, считает примерную цену ' +
+                'и возвращает план — подписанную строку. План надо ПОКАЗАТЬ ЧЕЛОВЕКУ вместе с описанием сцены ' +
+                'и ценой и дождаться прямого «да». Ничего не генерирует и денег не тратит. ' +
+                'Шаблона нет: сцену описываете своими словами, по-русски и подробно.',
             inputSchema: {
-                slot: z
-                    .enum(SLOTS)
-                    .describe(
-                        'Какой слайд карточки: ' +
-                            SLOTS.map(s => `${s} — ${SLOT_RULES[s].label}`).join('; ') +
-                            '. Полные правила — в media_template.'
-                    ),
-                scene: z
+                description: z
                     .string()
-                    .min(20)
+                    .min(40)
                     .describe(
-                        'Обстановка вокруг товара, по-русски и подробно: где стоит, что рядом, какой свет, ' +
-                            'какое настроение. Короткое описание даёт случайный результат.'
+                        'Сцена целиком, своими словами: где стоит товар, что вокруг, какой свет, какое настроение, ' +
+                            'как расположены предметы, как свёрстан текст. Чем подробнее, тем меньше случайности. ' +
+                            'Сохранность упаковки, посадку в кадр и запрет посторонних надписей дописывать не надо — ' +
+                            'они добавятся сами.'
                     ),
-                upload: z
-                    .string()
+                texts: z
+                    .array(z.string())
                     .optional()
-                    .describe('Код своего снимка, загруженного в панели: ref-xxxxxx. Предпочтительнее кадра из карточки.'),
-                nmId: z.number().int().positive().optional().describe('Товар на Wildberries — фото возьмётся из его карточки'),
-                offerId: z.string().optional().describe('Артикул продавца на Ozon — фото возьмётся из карточки Ozon'),
+                    .describe(
+                        'Надписи, которые лягут поверх картинки, по одной строке. Именно они проверяются на запреты ' +
+                            'площадок. Пусто — картинка без текста.'
+                    ),
+                upload: z.string().optional().describe('Код своего снимка: ref-xxxxxx'),
+                nmId: z.number().int().positive().optional().describe('Товар на Wildberries'),
+                offerId: z.string().optional().describe('Артикул продавца на Ozon'),
                 photo: z.number().int().positive().optional().describe('Номер фото в карточке, по умолчанию первое'),
-                imageUrl: z
-                    .string()
-                    .optional()
-                    .describe('Прямая ссылка на фото, если нужного кадра в карточке нет. Только витрины WB и Ozon.'),
-                cabinet: z.string().optional().describe('Кабинет Wildberries — нужен вместе с nmId'),
-                headline: z.string().optional().describe('Заголовок на картинке'),
-                bullets: z.array(z.string()).max(6).optional().describe('Пункты списка, не больше шести'),
-                badge: z.string().optional().describe('Надпись в круглой печати'),
-                footer: z.string().optional().describe('Нижняя плашка: объём, комплектация'),
+                imageUrl: z.string().optional().describe('Прямая ссылка на фото с витрины WB или Ozon'),
+                cabinet: z.string().optional().describe('Кабинет: harbez для Wildberries, oz-harbez для Ozon'),
                 size: z
                     .enum(Object.keys(SIZES) as [SizeKey, ...SizeKey[]])
                     .default('wb')
@@ -205,7 +172,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                 quality: z
                     .enum(['medium', 'high'])
                     .default('high')
-                    .describe('high — для готовой карточки; medium вдвое дешевле, но мелкий текст плывёт, годится на пробу')
+                    .describe('high — для готовой карточки; medium вдвое дешевле, но мелкий текст плывёт')
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -217,36 +184,28 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             if (!args.upload && !args.nmId && !args.offerId && !args.imageUrl) {
                 return fail(
                     'Нужно исходное фото товара. Спросите у человека, что берём: его собственный снимок ' +
-                        '(тогда пусть загрузит на странице /panel/reference и назовёт код ref-xxxxxx) ' +
-                        'или кадр из карточки площадки (nmId и кабинет для Wildberries, offerId и кабинет oz- для Ozon).'
+                        '(код ref-xxxxxx, найти можно через media_photos) или кадр из карточки площадки ' +
+                        '(nmId и кабинет для Wildberries, offerId и кабинет oz- для Ozon).'
                 );
             }
 
-            const overlay = overlayOf(args);
+            const texts = (args.texts ?? []).map(t => t.trim()).filter(Boolean);
 
             // Проверяем до денег: с запрещённой надписью карточку всё равно
             // завернёт модерация, а генерация уже будет оплачена.
-            const banned = checkOverlay(overlay);
+            const banned = checkTexts(texts);
             if (banned.length > 0) {
                 return fail(['Такие надписи площадки не пропустят:', ...banned.map(b => `— ${b}`)].join('\n'));
             }
 
-            const missing = checkNeeds(args.slot as Slot, overlay);
-            if (missing.length > 0) {
-                return fail(
-                    `Для слайда «${SLOT_RULES[args.slot as Slot].label}» не хватает: ${missing.join(', ')}. ` +
-                        'Что нужно на каждом слайде — в media_template.'
-                );
-            }
-
             const size = SIZES[args.size as SizeKey];
-            const prompt = buildPrompt({ slot: args.slot as Slot, scene: args.scene, overlay });
+            const prompt = buildPrompt({ description: args.description, texts });
             const estUsd = estimateUsd(size.width, size.height, args.quality as Quality, prompt.length);
 
             const overLimit = refuseIfOverLimit(who.email, estUsd);
             if (overLimit) return fail(overLimit);
 
-            // Фото скачиваем уже сейчас: пусть ошибка «нет такого товара»
+            // Фото достаём уже сейчас: пусть ошибка «нет такого товара»
             // придёт до согласования, а не после «да».
             const isOzon = Boolean(args.offerId);
             const cabinet = args.cabinet && !isOzon ? resolveCabinet(who, args.cabinet) : null;
@@ -271,7 +230,6 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             }
 
             const plan: Plan = {
-                slot: args.slot as Slot,
                 size: args.size as SizeKey,
                 quality: args.quality as Quality,
                 prompt,
@@ -281,7 +239,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
                 ...(args.offerId ? { offerId: args.offerId } : {}),
                 ...(args.photo ? { photo: args.photo } : {}),
                 ...(args.imageUrl ? { imageUrl: args.imageUrl } : {}),
-                overlay,
+                texts,
                 estUsd,
                 email: who.email,
                 at: Math.floor(Date.now() / 1000)
@@ -289,16 +247,15 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
 
             return text(
                 [
-                    `Слайд: ${SLOT_RULES[plan.slot].label}`,
                     `Исходное фото: ${source}`,
                     `Формат: ${size.width}×${size.height}, качество ${plan.quality}`,
                     `Примерная цена: около ${money(estUsd)} — точную скажу после запуска`,
                     describeBudget(who.email),
                     '',
-                    'ПРОМТ ЦЕЛИКОМ:',
+                    'ЗАПРОС ЦЕЛИКОМ:',
                     prompt,
                     '',
-                    'ПОКАЖИТЕ ЭТО ЧЕЛОВЕКУ — И ФОТО-ИСХОДНИК, И ПРОМТ — И ДОЖДИТЕСЬ ЯВНОГО СОГЛАСИЯ.',
+                    'ПОКАЖИТЕ ЭТО ЧЕЛОВЕКУ — И ФОТО-ИСХОДНИК, И ЗАПРОС — И ДОЖДИТЕСЬ ЯВНОГО СОГЛАСИЯ.',
                     'После «да» — media_generate с этой строкой:',
                     encodePlan(plan)
                 ].join('\n')
@@ -313,7 +270,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
             description:
                 'Второй шаг. Принимает ТОЛЬКО план из media_plan — своих параметров у него нет, поэтому ' +
                 'сгенерируется ровно то, что видел человек. Вызывать можно лишь после прямого согласия. ' +
-                'Считает около минуты и сразу возвращает ссылку на готовый файл и настоящую цену.',
+                'Считает около минуты и возвращает ссылку на готовый файл и настоящую цену.',
             inputSchema: {
                 plan: z.string().min(20).describe('Строка плана из media_plan, целиком и без изменений')
             },
@@ -363,7 +320,7 @@ export function registerMediaTools(server: McpServer, actor: Actor): void {
 
                 return text(
                     [
-                        `Готово: ${SLOT_RULES[plan.slot].label}, ${size.width}×${size.height}`,
+                        `Готово: ${size.width}×${size.height}`,
                         `Списалось: ${money(result.usd)}`,
                         describeBudget(who.email),
                         '',

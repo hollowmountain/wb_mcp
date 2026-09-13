@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 
 import { config } from '../config.js';
 import type { Quality } from './openai.js';
-import type { Overlay, SizeKey, Slot } from './slots.js';
+import type { SizeKey } from './compose.js';
 
 /**
  * Согласованный план генерации.
@@ -21,7 +21,6 @@ import type { Overlay, SizeKey, Slot } from './slots.js';
  */
 
 export interface Plan {
-    slot: Slot;
     size: SizeKey;
     quality: Quality;
     /** Готовый промт целиком — тот самый, что показали человеку. */
@@ -34,7 +33,7 @@ export interface Plan {
     photo?: number;
     imageUrl?: string;
     /** Что написано на картинке — чтобы повторить это в ответе и в журнале. */
-    overlay: Overlay;
+    texts: string[];
     /** Оценка на момент согласования. Настоящая цена придёт после запуска. */
     estUsd: number;
     /** Кому показали. Чужой план запустить нельзя. */
