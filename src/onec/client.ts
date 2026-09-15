@@ -82,9 +82,261 @@ export const ALLOWED_ENTITIES = [
     'AccumulationRegister_Продажи/Turnovers'
 ] as const;
 
-export type OnecEntity = (typeof ALLOWED_ENTITIES)[number];
+/**
+ * Имя сущности. Раньше это был союз из тридцати строковых литералов, и он
+ * ловил опечатки на этапе сборки. С открытием почти всей базы такой союз
+ * потерял смысл: имена приходят от человека, а не из кода. Проверку взял на
+ * себя isAllowed во время запроса.
+ */
+export type OnecEntity = string;
 
 const allowed = new Set<string>(ALLOWED_ENTITIES);
+
+
+/**
+ * Всё остальное, что в базе не пусто.
+ *
+ * До 15.09.2026 коннектору было открыто около тридцати сущностей, и на каждый
+ * вопрос вроде «а покажи задания на работу» приходилось лезть в код. Список
+ * снят перебором: из 1461 опубликованной сущности непустых оказалось 197.
+ * Пустые не открываем намеренно — они только зашумляют справку.
+ *
+ * Табличные части и виртуальные таблицы отдельно не перечислены: разрешение
+ * распространяется на них само, см. isAllowed.
+ */
+export const OPEN_ENTITIES: readonly string[] = [
+    'AccountingRegister_Управленческий',
+    'AccumulationRegister_ВнеоборотныеАктивы',
+    'AccumulationRegister_ВыпускПродукции',
+    'AccumulationRegister_ГрафикДвиженияЗапасов',
+    'AccumulationRegister_ДвиженияДенежныхСредств',
+    'AccumulationRegister_ДенежныеСредства',
+    'AccumulationRegister_ДенежныеСредстваВРезерве',
+    'AccumulationRegister_ДоходыИРасходы',
+    'AccumulationRegister_ЗаданияНаРаботу',
+    'AccumulationRegister_ЗаказыНаПроизводство',
+    'AccumulationRegister_ЗаказыПокупателей',
+    'AccumulationRegister_ЗаказыПоставщикам',
+    'AccumulationRegister_Закупки',
+    'AccumulationRegister_ЗакупкиДляКУДиР',
+    'AccumulationRegister_Запасы',
+    'AccumulationRegister_ЗапасыНаСкладах',
+    'AccumulationRegister_ЗапасыПереданные',
+    'AccumulationRegister_КнигаУчетаДоходовИРасходов',
+    'AccumulationRegister_НДСЗаписиКнигиПродаж',
+    'AccumulationRegister_НДСПредъявленный',
+    'AccumulationRegister_ОплатаДокументов',
+    'AccumulationRegister_ОплатаСчетовИЗаказов',
+    'AccumulationRegister_ПартииТоваровУСН',
+    'AccumulationRegister_ПлатежныйКалендарь',
+    'AccumulationRegister_ПотребностьВЗапасах',
+    'AccumulationRegister_Продажи',
+    'AccumulationRegister_РазмещениеЗаказов',
+    'AccumulationRegister_РасчетыПоНалогам',
+    'AccumulationRegister_РасчетыСПокупателями',
+    'AccumulationRegister_РасчетыСПоставщиками',
+    'AccumulationRegister_СдельныеНаряды',
+    'AccumulationRegister_ФинансовыйРезультат',
+    'AccumulationRegister_ЭтапыПроизводства',
+    'Catalog_АвтоматическиеСкидки',
+    'Catalog_АдресатыПисем',
+    'Catalog_Банки',
+    'Catalog_БанковскиеСчета',
+    'Catalog_ВидыДокументовФизическихЛиц',
+    'Catalog_ВидыДоходовПоСтраховымВзносам',
+    'Catalog_ВидыДоходовПоСтраховымВзносамУНФ',
+    'Catalog_ВидыЗаказНарядов',
+    'Catalog_ВидыЗаказовПокупателей',
+    'Catalog_ВидыКонтактнойИнформации',
+    'Catalog_ВидыНалогов',
+    'Catalog_ВидыОтправляемыхДокументов',
+    'Catalog_ВидыПроизводства',
+    'Catalog_ВидыРесурсовПредприятия',
+    'Catalog_ВидыЦен',
+    'Catalog_ВидыЦенКонтрагентов',
+    'Catalog_ВнеоборотныеАктивы',
+    'Catalog_ДоговорыКонтрагентов',
+    'Catalog_ДополнительныеУсловия',
+    'Catalog_ДрайверыОборудования',
+    'Catalog_ЕдиницыИзмерения',
+    'Catalog_ЗадачиАссистентаУправления',
+    'Catalog_ЗначенияСвойствОбъектов',
+    'Catalog_ИдентификаторыОбъектовМетаданных',
+    'Catalog_ИсточникиПривлеченияПокупателей',
+    'Catalog_Календари',
+    'Catalog_Кассы',
+    'Catalog_КатегорииНоменклатуры',
+    'Catalog_КлассификаторБанков',
+    'Catalog_КлассификаторЕдиницИзмерения',
+    'Catalog_КлассификаторЗанятий',
+    'Catalog_КлассификаторЗанятийУНФ',
+    'Catalog_КлассификаторТНВЭД',
+    'Catalog_КлючевыеРесурсы',
+    'Catalog_КодыОперацийПрослеживаемости',
+    'Catalog_КомплектацииНоменклатуры',
+    'Catalog_КонтактныеЛица',
+    'Catalog_Контрагенты',
+    'Catalog_НаборыДополнительныхРеквизитовИСведений',
+    'Catalog_НаправленияДеятельности',
+    'Catalog_Номенклатура',
+    'Catalog_НоменклатураПрисоединенныеФайлы',
+    'Catalog_Операции0',
+    'Catalog_Организации',
+    'Catalog_ОрганизацииПрисоединенныеФайлы',
+    'Catalog_ПараметрыРасчетовДоставки',
+    'Catalog_ПодключаемоеОборудование',
+    'Catalog_Подписи',
+    'Catalog_ПоказателиРасчетов',
+    'Catalog_ПолитикаУчетаСерий',
+    'Catalog_ПрайсЛисты',
+    'Catalog_ПричиныНеуспешногоЗавершенияРаботыСЛидом',
+    'Catalog_ПричиныОтменыЗаказа',
+    'Catalog_ПричиныОтменыЗаказовПоставщикам',
+    'Catalog_ПроизводственныеКалендари',
+    'Catalog_РабочиеМеста',
+    'Catalog_РегистрацииВНалоговомОргане',
+    'Catalog_РегламентированныеОтчеты',
+    'Catalog_СегментыКонтрагентов',
+    'Catalog_СлужбыДоставки',
+    'Catalog_СостоянияЗаказНарядов',
+    'Catalog_СостоянияЗаказовНаПеремещение',
+    'Catalog_СостоянияЗаказовНаПроизводство',
+    'Catalog_СостоянияЗаказовПокупателей',
+    'Catalog_СостоянияЗаказовПоставщикам',
+    'Catalog_СостоянияЛидов',
+    'Catalog_СостоянияСобытий',
+    'Catalog_Спецификации',
+    'Catalog_СтавкиНДС',
+    'Catalog_СтатьиДвиженияДенежныхСредств',
+    'Catalog_СтраныМира',
+    'Catalog_СтруктурныеЕдиницы',
+    'Catalog_СценарииПланирования',
+    'Catalog_Теги',
+    'Catalog_ТипыДокументов',
+    'Catalog_УсловияПредоставленияСкидокНаценок',
+    'Catalog_УчетныеЗаписиЭлектроннойПочты',
+    'Catalog_ХарактеристикиНоменклатуры',
+    'Catalog_ХарактеристикиНоменклатурыПрисоединенныеФайлы',
+    'Catalog_ХозяйственныеОперации',
+    'Catalog_ХранилищеШаблонов',
+    'Catalog_ШаблоныПоясненийДляФНС',
+    'Catalog_ШаблоныЭтикетокИЦенниковБПО',
+    'Catalog_ШтрихкодыУпаковокТоваров',
+    'Catalog_ЭтапыПроизводства',
+    'ChartOfAccounts_Управленческий',
+    'ChartOfCharacteristicTypes_ДополнительныеРеквизитыИСведения',
+    'Document_АмортизацияВА',
+    'Document_ВводНачальныхОстатков',
+    'Document_Взаимозачет',
+    'Document_ДоговорКредитаИЗайма',
+    'Document_ДополнительныеРасходы',
+    'Document_ЗаданиеНаРаботу',
+    'Document_ЗаказНаПроизводство',
+    'Document_ЗаказПокупателя',
+    'Document_ЗаказПоставщику',
+    'Document_ЗакрытиеМесяца',
+    'Document_ЗаписиУСН',
+    'Document_ИнвентаризацияЗапасов',
+    'Document_ОприходованиеЗапасов',
+    'Document_ОтчетКомиссионера',
+    'Document_ОтчетКомиссионераОСписании',
+    'Document_ПеремещениеДС',
+    'Document_ПеремещениеЗапасов',
+    'Document_ПересортицаЗапасов',
+    'Document_ПоступлениеВКассу',
+    'Document_ПоступлениеНаСчет',
+    'Document_ПриходнаяНакладная',
+    'Document_РаспределениеЗатрат',
+    'Document_РасходИзКассы',
+    'Document_РасходСоСчета',
+    'Document_РасходнаяНакладная',
+    'Document_СборкаЗапасов',
+    'Document_СверкаВзаиморасчетов',
+    'Document_СдельныйНаряд',
+    'Document_СписаниеЗапасов',
+    'Document_СчетФактура',
+    'Document_СчетФактураПолученный',
+    'Document_УстановкаЦенНоменклатуры',
+    'InformationRegister_ЖурналУчетаСчетовФактур',
+    'InformationRegister_ОписаниеОперацииКУДиР',
+    'InformationRegister_ОшибкиЗакрытияМесяца',
+    'InformationRegister_ПараметрыВнеоборотныхАктивов',
+    'InformationRegister_СостоянияВнеоборотныхАктивов',
+];
+
+/**
+ * Данные о людях: физлица, зарплата, НДФЛ, взносы, кадровые документы.
+ *
+ * Лежат в той же базе и читаются тем же способом, но областью отделены —
+ * менеджеру кабинета незачем видеть, кто сколько получает. Нужна область
+ * payroll, как и для сдельных нарядов.
+ */
+export const PERSONAL_ENTITIES: readonly string[] = [
+    'AccumulationRegister_НачисленияИУдержания',
+    'AccumulationRegister_РасчетыСПерсоналом',
+    'AccumulationRegister_РасчетыСПодотчетниками',
+    'Catalog_АналитикаНачисленияБонусов',
+    'Catalog_Бригады',
+    'Catalog_ВидыВычетовНДФЛ',
+    'Catalog_ВидыДоходовНДФЛ',
+    'Catalog_ВидыНачисленийИУдержаний',
+    'Catalog_ВидыОбщественноПолезнойДеятельностиСЗВК',
+    'Catalog_ВидыРабочегоВремени',
+    'Catalog_ВидыТарифовСтраховыхВзносов',
+    'Catalog_ВычетыНДФЛ',
+    'Catalog_ГрафикиРаботы',
+    'Catalog_ГруппыПользователей',
+    'Catalog_Должности',
+    'Catalog_ЗамещениеГосударственныхМуниципальныхДолжностейПФР',
+    'Catalog_КалендариСотрудников',
+    'Catalog_КодыДоходовНДФЛ',
+    'Catalog_ОснованияИсчисляемогоСтраховогоСтажа',
+    'Catalog_ОснованияУвольнения',
+    'Catalog_ПараметрыИсчисляемогоСтраховогоСтажа',
+    'Catalog_Пользователи',
+    'Catalog_ПричиныУвольненияПФР',
+    'Catalog_Сотрудники',
+    'Catalog_СпособыВыплатыЗарплаты',
+    'Catalog_СпособыОкругленияПриРасчетеЗарплаты',
+    'Catalog_СтатусыНалогоплательщиковПоНДФЛ',
+    'Catalog_СтатьиРасходовЗарплата',
+    'Catalog_ТерриториальныеУсловияПФР',
+    'Catalog_ТрудовыеФункции',
+    'Catalog_ФизическиеЛица',
+    'Catalog_ФизическиеЛицаПрисоединенныеФайлы',
+    'Catalog_ШаблоныЗаполненияГрафиковРабочегоВремени',
+    'ChartOfCalculationTypes_Начисления',
+    'Document_Доверенность',
+    'Document_КадровоеПеремещениеУНФ',
+    'Document_ПриемНаРаботуУНФ',
+    'Document_УвольнениеУНФ',
+    'InformationRegister_ПлановыеНачисленияИУдержания',
+    'InformationRegister_Сотрудники',
+];
+
+const openSet = new Set<string>([...OPEN_ENTITIES, ...PERSONAL_ENTITIES]);
+const personalSet = new Set<string>(PERSONAL_ENTITIES);
+
+/** Имя без табличной части и без виртуальной таблицы: «Document_X_Строки» → «Document_X». */
+function baseOf(entity: string): string {
+    const head = entity.split('/')[0] ?? entity;
+    const parts = head.split('_');
+    return parts.length > 2 ? parts.slice(0, 2).join('_') : head;
+}
+
+/**
+ * Разрешено ли читать. Табличные части и виртуальные таблицы наследуют
+ * разрешение родителя: перечислять «Document_X_Запасы» рядом с «Document_X»
+ * значило бы вести список из полутора тысяч строк и всё равно что-то забыть.
+ */
+export function isAllowed(entity: string): boolean {
+    if (allowed.has(entity)) return true;
+    const base = baseOf(entity);
+    return openSet.has(base) || openSet.has(entity.split('/')[0] ?? entity);
+}
+
+/** Нужна ли для этой сущности область payroll, а не просто erp. */
+export const isPersonal = (entity: string): boolean => personalSet.has(baseOf(entity));
 
 /** База в облаке, лимитов не публикует. Ходим сдержанно. */
 const bucket = new TokenBucket(4, 1);
@@ -128,11 +380,13 @@ async function fetchEntity<T>(
     entity: string,
     query: Record<string, string | number | undefined>
 ): Promise<T> {
-    if (!allowed.has(entity)) {
+    if (!isAllowed(entity)) {
         // Не «нет данных», а именно отказ: так видно, что сработал запрет,
-        // а не опечатка в имени.
+        // а не опечатка в имени. Полный список не печатаем — он длиной в две
+        // сотни строк и в сообщении об ошибке бесполезен.
         throw new OnecError(
-            `Обращение к «${entity}» не разрешено. Коннектору открыты только: ${ALLOWED_ENTITIES.join(', ')}`,
+            `Обращение к «${entity}» не разрешено: такой сущности в базе нет либо она пуста. ` +
+                'Что открыто — покажет onec_entities.',
             403,
             entity
         );

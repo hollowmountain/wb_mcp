@@ -6,6 +6,10 @@ import { config } from '../../config.js';
 import { inArea } from '../../auth/provider.js';
 import {
     ALLOWED_ENTITIES,
+    OPEN_ENTITIES,
+    PERSONAL_ENTITIES,
+    isAllowed,
+    isPersonal,
     countEntity,
     getOnecCashFlow,
     getOnecStock,
@@ -295,12 +299,16 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 'onec_receipts    Приходные накладные с ценами: что и почём поступило.',
                 'onec_piecework   Сдельные наряды: кто из работников что сделал и на сколько.',
                 'onec_worktasks   Задания на работу (в интерфейсе — заказ-наряды): часы, ставка, сумма.',
+                'onec_entities   Какие ещё разделы базы можно прочитать, с числом записей.',
+                'onec_read       Прочитать любой раздел напрямую, когда готового инструмента нет.',
                 'onec_reference   Эта справка.',
                 '',
                 '── ЧЕГО В БАЗЕ НЕТ ──',
                 '',
-                'Начисления зарплаты не ведутся — документ пуст. Но сдельные наряды есть,',
-                'и в них видно, кто сколько заработал за день (onec_piecework).',
+                'Документ «Начисление зарплаты» пуст — зарплату им не считают. Но оплата труда',
+                'видна с двух других сторон: сдельные наряды (onec_piecework) и почасовые',
+                'задания на работу (onec_worktasks). Итоги по людям накоплены в регистрах',
+                'РасчетыСПерсоналом и НачисленияИУдержания — их читает onec_read.',
                 'Денежная оценка запасов есть — onec_stock_value, регистр суммового учёта.',
                 'Партионного учёта при этом нет, партии пусты.',
                 'Отзывов, вопросов и переписки с покупателями в 1С нет — это площадки,',
@@ -309,9 +317,16 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 '',
                 '── ЧЕГО НЕТ У КОННЕКТОРА ──',
                 '',
-                'В базе опубликовано больше полутора тысяч сущностей, включая справочники',
-                'физических лиц и сотрудников. Коннектору из них открыт короткий список,',
-                'всё остальное для него не существует и вернёт отказ:',
+                'С 15.09.2026 открыты все непустые разделы базы — их около двух сотен из',
+                'полутора тысяч опубликованных. Пустые закрыты: они только зашумляли бы',
+                'справку. Полный список с поиском — onec_entities, чтение — onec_read.',
+                '',
+                'Разделы про людей и оплату труда отделены областью payroll: физические лица,',
+                'НДФЛ, взносы, кадровые документы. Без неё они не видны и в списке.',
+                '',
+                'Ниже — разделы, под которые есть отдельные инструменты с расшифровкой',
+                'ссылок и сводом. Их и берите первыми, onec_read нужен только там,',
+                'где готового инструмента нет:',
                 ''
             ];
 
@@ -329,8 +344,8 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
 
             lines.push(
                 '',
-                'Если для работы нужен раздел, которого здесь нет, — скажите администратору,',
-                'какой именно и зачем. Список расширяется, но осознанно.'
+                'Раздела не хватило — не спрашивайте администратора, посмотрите onec_entities:',
+                'скорее всего он уже открыт и читается через onec_read.'
             );
             return text(lines.join('\n'));
         })
@@ -872,6 +887,154 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     ...svod,
                     '',
                     ...list
+                ].join('\n')
+            );
+        })
+    );
+
+    server.registerTool(
+        'onec_entities',
+        {
+            title: '1С: что вообще есть в базе',
+            description:
+                'Список разделов базы, которые можно прочитать через onec_read, с числом записей. ' +
+                'Нужен, когда готового инструмента под вопрос нет и надо понять, где лежат данные. ' +
+                'Поиск по части названия — по-русски, как раздел называется в 1С.',
+            inputSchema: {
+                find: z.string().optional().describe('Часть названия, например «зарплат», «производств», «скидк»'),
+                kind: z
+                    .enum(['все', 'справочники', 'документы', 'регистры'])
+                    .optional()
+                    .describe('Чем ограничить список. По умолчанию все.')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: false }
+        },
+        guarded('onec_entities', async (args, extra) => {
+            const actor = actorOf(extra);
+            if (!anyOnec(actor)) return fail('Учётная система 1С вам не открыта: нужна область «erp».');
+            const seesPeople = inArea(actor, 'payroll');
+
+            const all = [...OPEN_ENTITIES, ...(seesPeople ? PERSONAL_ENTITIES : [])];
+            const prefix =
+                args.kind === 'справочники'
+                    ? 'Catalog_'
+                    : args.kind === 'документы'
+                      ? 'Document_'
+                      : args.kind === 'регистры'
+                        ? 'Register'
+                        : '';
+            // Сравниваем в нижнем регистре средствами JS: lower() в SQLite и \b
+            // в регулярных выражениях кириллицу не знают, и такой поиск молча
+            // ничего не находил бы.
+            const needle = args.find?.trim().toLowerCase();
+            const rows = all
+                .filter(e => (prefix === 'Register' ? e.includes('Register_') : e.startsWith(prefix)))
+                .filter(e => !needle || e.toLowerCase().includes(needle))
+                .sort();
+
+            if (rows.length === 0) {
+                return text(
+                    needle
+                        ? `По запросу «${args.find}» разделов нет. Попробуйте короче: «зарплат» вместо «зарплата сотрудников».`
+                        : 'Разделов нет.'
+                );
+            }
+
+            const head = needle ? `Найдено разделов: ${rows.length}` : `Открыто разделов: ${rows.length}`;
+            return text(
+                [
+                    head,
+                    '',
+                    ...rows.map(e => `   ${e}`),
+                    '',
+                    'Читать — onec_read, имя сущности брать отсюда целиком.',
+                    'Табличные части дописываются через подчёркивание: Document_РасходнаяНакладная_Запасы.',
+                    seesPeople ? '' : 'Разделы про людей и зарплату в этот список не входят: нужна область payroll.'
+                ]
+                    .filter(Boolean)
+                    .join('\n')
+            );
+        })
+    );
+
+    server.registerTool(
+        'onec_read',
+        {
+            title: '1С: прочитать любой раздел базы',
+            description:
+                'Читает произвольную сущность 1С по её имени. Нужен там, где готового инструмента нет. ' +
+                'Если под задачу есть отдельный инструмент (onec_money, onec_stock, onec_orders и прочие) — ' +
+                'берите его: там данные уже расшифрованы и сведены, а здесь ссылки приходят в виде GUID. ' +
+                'Имена разделов — onec_entities. Только чтение.',
+            inputSchema: {
+                entity: z
+                    .string()
+                    .min(3)
+                    .describe('Имя сущности целиком, например Document_ЗаданиеНаРаботу или Catalog_Должности'),
+                filter: z
+                    .string()
+                    .optional()
+                    .describe(
+                        "Условие OData $filter, например: Date ge datetime'2026-09-01T00:00:00' and DeletionMark eq false. " +
+                            'Поиск по подстроке — substringof(\'слово\', Description).'
+                    ),
+                select: z.string().optional().describe('Какие поля вернуть через запятую. Пусто — все.'),
+                orderby: z.string().optional().describe('Сортировка, например Date desc'),
+                top: z.number().int().min(1).max(200).optional().describe('Сколько строк, по умолчанию 20'),
+                skip: z.number().int().min(0).optional().describe('Сколько пропустить — для листания')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_read', async (args, extra) => {
+            const actor = actorOf(extra);
+            if (!anyOnec(actor)) return fail('Учётная система 1С вам не открыта: нужна область «erp».');
+
+            const entity = args.entity.trim();
+            if (!isAllowed(entity)) {
+                return fail(
+                    `Раздела «${entity}» в базе нет либо он пуст. Посмотрите точное имя через onec_entities.`
+                );
+            }
+            if (isPersonal(entity) && !inArea(actor, 'payroll')) {
+                return fail(
+                    `Раздел «${entity}» — про людей и оплату труда. Нужна область «payroll». Обратитесь к администратору.`
+                );
+            }
+
+            const asked = args.top ?? 20;
+            // На одну больше, чем покажем: иначе ровно заполненная страница
+            // выглядит как «это всё», и человек считает итог по обрезку.
+            const fetched = await listEntity<Record<string, unknown>>(config.onec, entity, {
+                top: asked + 1,
+                skip: args.skip,
+                filter: args.filter,
+                select: args.select,
+                orderby: args.orderby
+            });
+            const more = fetched.length > asked;
+            const rows = more ? fetched.slice(0, asked) : fetched;
+            if (rows.length === 0) return text(`В «${entity}» по такому условию ничего нет.`);
+
+            const render = (r: Record<string, unknown>): string =>
+                Object.entries(r)
+                    // Служебные поля навигации 1С отдаёт к каждой ссылке, и они
+                    // занимают больше места, чем сами данные.
+                    .filter(([k]) => !k.includes('@navigationLinkUrl') && k !== 'DataVersion')
+                    .map(([k, v]) => {
+                        if (v === null || v === undefined || v === '') return `   ${k}: ${dash}`;
+                        if (Array.isArray(v)) return `   ${k}: строк ${v.length}`;
+                        if (typeof v === 'object') return `   ${k}: {…}`;
+                        return `   ${k}: ${String(v)}`;
+                    })
+                    .join('\n');
+
+            return text(
+                [
+                    `${entity}: строк ${rows.length}${more ? ' (есть ещё — увеличьте top или листайте через skip)' : ''}`,
+                    '',
+                    ...rows.map((r, i) => `${i + 1}.\n${render(r)}`),
+                    '',
+                    'Поля вида «…_Key» — это ссылки на другие разделы, читаются через onec_read по имени того раздела.'
                 ].join('\n')
             );
         })
