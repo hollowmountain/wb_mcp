@@ -49,6 +49,24 @@ interface Product {
     IsFolder: boolean;
 }
 
+interface WorkLine {
+    Трудоемкость?: number;
+    Цена?: number;
+    Сумма?: number;
+    Комментарий?: string;
+}
+
+interface WorkTask {
+    Ref_Key: string;
+    Number?: string;
+    Date?: string;
+    Posted?: boolean;
+    Сотрудник_Key?: string;
+    Состояние_Key?: string;
+    СуммаДокумента?: number;
+    Работы?: WorkLine[];
+}
+
 interface Partner {
     Ref_Key: string;
     Code: string;
@@ -276,6 +294,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 'onec_shipments   Расходные накладные: что и кому отгружено, с ценами.',
                 'onec_receipts    Приходные накладные с ценами: что и почём поступило.',
                 'onec_piecework   Сдельные наряды: кто из работников что сделал и на сколько.',
+                'onec_worktasks   Задания на работу (в интерфейсе — заказ-наряды): часы, ставка, сумма.',
                 'onec_reference   Эта справка.',
                 '',
                 '── ЧЕГО В БАЗЕ НЕТ ──',
@@ -713,6 +732,143 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                           (notPosted > 0 ? `, из них не проведено ${notPosted}` : ''),
                     '',
                     'По исполнителям:',
+                    ...svod,
+                    '',
+                    ...list
+                ].join('\n')
+            );
+        })
+    );
+
+    server.registerTool(
+        'onec_worktasks',
+        {
+            title: '1С: задания на работу (заказ-наряды)',
+            description:
+                'Задания на работу за период: кто, сколько часов отработал, по какой ставке и на какую сумму. ' +
+                'В интерфейсе 1С это «заказ-наряды». По умолчанию за последние семь дней. ' +
+                'Внизу — свод по сотрудникам. Сдельная оплата лежит отдельно, в onec_piecework.',
+            inputSchema: {
+                dateFrom: z.string().optional().describe('Начало периода, ISO-дата. Не указано — семь дней назад.'),
+                dateTo: z.string().optional().describe('Конец периода, ISO-дата. Не указано — сегодня.'),
+                employee: z.string().optional().describe('Часть фамилии сотрудника'),
+                openOnly: z.boolean().optional().describe('Только незавершённые'),
+                withWork: z.boolean().optional().describe('Показать строки работ с часами и комментарием'),
+                limit: z.number().int().min(1).max(300).optional().describe('Сколько заданий показать, по умолчанию 50')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('onec_worktasks', async (args, extra) => {
+            const actor = actorOf(extra);
+            if (!onecReady() || !inArea(actor, 'payroll')) {
+                return fail('Область «сдельная оплата труда» вам не открыта. Обратитесь к администратору.');
+            }
+
+            const today = new Date().toISOString().slice(0, 10);
+            const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+            const from = (args.dateFrom ?? weekAgo).slice(0, 10);
+            const to = (args.dateTo ?? today).slice(0, 10);
+
+            const askedFor = args.limit ?? 50;
+            // На одну больше, чем покажем: свод и сумма по обрезанной выборке
+            // выглядели бы как итог за период, а по ним считают оплату.
+            const fetched = await listEntity<WorkTask>(config.onec, 'Document_ЗаданиеНаРаботу', {
+                top: askedFor + 1,
+                filter: `Date ge datetime'${from}T00:00:00' and Date le datetime'${to}T23:59:59' and DeletionMark eq false`,
+                orderby: 'Date desc'
+            });
+            const truncated = fetched.length > askedFor;
+            const rows = truncated ? fetched.slice(0, askedFor) : fetched;
+            if (rows.length === 0) return text(`Заданий на работу за ${from} — ${to} нет.`);
+
+            const people = await resolveNames(
+                config.onec,
+                'Catalog_Сотрудники',
+                rows.map(r => String(r.Сотрудник_Key ?? ''))
+            );
+            const states = await resolveNames(
+                config.onec,
+                'Catalog_СостоянияЗаказНарядов',
+                rows.map(r => String(r.Состояние_Key ?? ''))
+            );
+
+            const needle = args.employee?.trim().toLowerCase();
+            let wanted = needle
+                ? rows.filter(r => (people.get(String(r.Сотрудник_Key ?? '')) ?? '').toLowerCase().includes(needle))
+                : rows;
+            if (args.openOnly) {
+                wanted = wanted.filter(r => (states.get(String(r.Состояние_Key ?? '')) ?? '') !== 'Завершен');
+            }
+            if (wanted.length === 0) {
+                return text(
+                    needle ? `Заданий по запросу «${args.employee}» за период нет.` : 'Незавершённых заданий за период нет.'
+                );
+            }
+
+            const worksOf = (r: WorkTask): WorkLine[] => (Array.isArray(r.Работы) ? r.Работы : []);
+            const hoursOf = (r: WorkTask): number =>
+                worksOf(r).reduce((h, w) => h + (typeof w.Трудоемкость === 'number' ? w.Трудоемкость : 0), 0);
+
+            const byPerson = new Map<string, { sum: number; hours: number; count: number }>();
+            for (const r of wanted) {
+                const who = people.get(String(r.Сотрудник_Key ?? '')) || '(без сотрудника)';
+                const acc = byPerson.get(who) ?? { sum: 0, hours: 0, count: 0 };
+                acc.sum += r.СуммаДокумента ?? 0;
+                acc.hours += hoursOf(r);
+                acc.count += 1;
+                byPerson.set(who, acc);
+            }
+            const total = wanted.reduce((s, r) => s + (r.СуммаДокумента ?? 0), 0);
+            const totalHours = wanted.reduce((h, r) => h + hoursOf(r), 0);
+            const notPosted = wanted.filter(r => r.Posted === false).length;
+
+            const svod = [...byPerson.entries()]
+                .sort((a, b) => b[1].sum - a[1].sum)
+                .map(([who, v]) => `   ${who} ${dash} ${money(v.sum)}, часов ${v.hours}, заданий ${v.count}`);
+
+            const list = wanted.map(r => {
+                const who = people.get(String(r.Сотрудник_Key ?? '')) || '(без сотрудника)';
+                const state = states.get(String(r.Состояние_Key ?? '')) || dash;
+                const hours = hoursOf(r);
+                const head =
+                    `№ ${r.Number || dash} от ${day(r.Date)} ${dash} ${who} ${dash} ${money(r.СуммаДокумента)}` +
+                    (hours > 0 ? `, часов ${hours}` : '') +
+                    ` ${dash} ${state}` +
+                    (r.Posted === false ? ' (не проведён)' : '');
+                if (!args.withWork) return head;
+                const works = worksOf(r);
+                if (works.length === 0) return `${head}\n   строк работ нет`;
+                return (
+                    head +
+                    '\n' +
+                    works
+                        .slice(0, 20)
+                        .map(w => {
+                            const h = typeof w.Трудоемкость === 'number' ? `${w.Трудоемкость} ч` : dash;
+                            // Ставку показываем, только если она заполнена: часть
+                            // заданий закрывают суммой, и «× 0 ₽» читалось бы как
+                            // ошибка расчёта, а не как пустое поле.
+                            const rate = typeof w.Цена === 'number' && w.Цена !== 0 ? ` × ${money(w.Цена)}` : '';
+                            const sum = typeof w.Сумма === 'number' ? ` = ${money(w.Сумма)}` : '';
+                            // Что именно делали, записано только в комментарии —
+                            // вид работ и номенклатура в этих документах пустые.
+                            const note = (w.Комментарий ?? '').trim().replace(/\s*\n\s*/g, '; ');
+                            return `   ${h}${rate}${sum}${note ? ` ${dash} ${note}` : ''}`;
+                        })
+                        .join('\n')
+                );
+            });
+
+            return text(
+                [
+                    truncated
+                        ? `${from} — ${to}: показано ${wanted.length} заданий, но за период их больше.` +
+                          `\nСумма ${money(total)} и свод ниже — только по показанным, НЕ итог за период.` +
+                          `\nВозьмите период короче или увеличьте limit.`
+                        : `${from} — ${to}: заданий ${wanted.length}, часов ${totalHours}, на сумму ${money(total)}` +
+                          (notPosted > 0 ? `, из них не проведено ${notPosted}` : ''),
+                    '',
+                    'По сотрудникам:',
                     ...svod,
                     '',
                     ...list
