@@ -605,3 +605,125 @@ export function groupRegionSales(rows: RegionSaleRow[], level: RegionLevel): Reg
         .map(([name, v]) => ({ name, amount: v.amount, quantity: v.quantity, share: total > 0 ? (v.amount / total) * 100 : 0 }))
         .sort((a, b) => b.amount - a.amount);
 }
+
+
+// ─── Цена покупателя: из заказов статистики ──────────────────────────────────
+
+/**
+ * Строка заказа из statistics-api. Нужна ради одного: здесь лежит цена,
+ * которую заплатил покупатель, а не та, что стоит в кабинете.
+ *
+ * Зачем так, а не с сайта. До 22.09.2026 цену покупателя брали запланированные
+ * задачи прямо с витрины — card.wb.ru. Потом WB закрыл витрину для программ:
+ * v2 отвечает 404, v4 и u-card — 403, главная — 498 (антибот). Проверено из
+ * трёх мест: Киргизия и два сервера в Нидерландах, везде одинаково. Официальный
+ * API продавца при этом работает, и в нём то же число — finishedPrice.
+ */
+export interface StatOrder {
+    date: string;
+    lastChangeDate: string;
+    nmId: number;
+    supplierArticle: string;
+    subject: string;
+    brand: string;
+    techSize: string;
+    /** Цена до всех скидок. */
+    totalPrice: number;
+    /** Скидка продавца, %. */
+    discountPercent: number;
+    /** Цена со скидкой продавца — ровно та, что стоит в кабинете. */
+    priceWithDisc: number;
+    /** Скидка постоянного покупателя, %. Её даёт сам WB, продавец на неё не влияет. */
+    spp: number;
+    /** Сколько заплатил покупатель: цена в кабинете минус СПП. */
+    finishedPrice: number;
+    isCancel: boolean;
+    regionName: string;
+}
+
+/** Сколько дней назад тянем. Одна выгрузка покрывает любой запрос внутри окна. */
+export const STAT_WINDOW_DAYS = 7;
+
+/**
+ * Лимит statistics-api — один запрос в пять минут на кабинет. Без кэша второй
+ * вопрос подряд ждал бы пять минут и падал по тайм-ауту. Десять минут — с
+ * запасом над лимитом и достаточно свежо: WB и сам отдаёт статистику с
+ * задержкой около получаса.
+ */
+const STAT_TTL_MS = 10 * 60 * 1000;
+const statCache = new Map<string, { at: number; rows: StatOrder[] }>();
+// Два вопроса одновременно не должны устроить два запроса: второй встал бы
+// в ведро на пять минут. Ждут один и тот же.
+const statPending = new Map<string, Promise<{ at: number; rows: StatOrder[] }>>();
+
+export async function listStatOrders(cabinet: Cabinet): Promise<{ rows: StatOrder[]; fetchedAt: number }> {
+    const hit = statCache.get(cabinet.slug);
+    if (hit && Date.now() - hit.at < STAT_TTL_MS) return { rows: hit.rows, fetchedAt: hit.at };
+
+    let pending = statPending.get(cabinet.slug);
+    if (!pending) {
+        const from = new Date(Date.now() - STAT_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+        pending = wbJson<StatOrder[]>(cabinet, 'statistics', {
+            path: '/api/v1/supplier/orders',
+            query: { dateFrom: from, flag: 0 }
+        })
+            .then(rows => {
+                const entry = { at: Date.now(), rows: Array.isArray(rows) ? rows : [] };
+                statCache.set(cabinet.slug, entry);
+                return entry;
+            })
+            .finally(() => statPending.delete(cabinet.slug));
+        statPending.set(cabinet.slug, pending);
+    }
+    const entry = await pending;
+    return { rows: entry.rows, fetchedAt: entry.at };
+}
+
+export interface BuyerPrice {
+    nmId: number;
+    article: string;
+    subject: string;
+    /** Последний неотменённый заказ. */
+    lastDate: string;
+    priceWithDisc: number;
+    spp: number;
+    finishedPrice: number;
+    /** Разброс цены покупателя за окно — СПП у WB плавает в течение дня. */
+    minFinished: number;
+    maxFinished: number;
+    orders: number;
+}
+
+/** Сводит заказы до одной строки на номенклатуру. Отменённые не считаем: цена в них та же, но это не покупка. */
+export function groupBuyerPrices(rows: StatOrder[], sinceIso: string): BuyerPrice[] {
+    const acc = new Map<number, BuyerPrice>();
+    for (const r of rows) {
+        if (r.isCancel || !r.date || r.date < sinceIso) continue;
+        const cur = acc.get(r.nmId);
+        if (!cur) {
+            acc.set(r.nmId, {
+                nmId: r.nmId,
+                article: r.supplierArticle,
+                subject: r.subject,
+                lastDate: r.date,
+                priceWithDisc: r.priceWithDisc,
+                spp: r.spp,
+                finishedPrice: r.finishedPrice,
+                minFinished: r.finishedPrice,
+                maxFinished: r.finishedPrice,
+                orders: 1
+            });
+            continue;
+        }
+        cur.orders += 1;
+        cur.minFinished = Math.min(cur.minFinished, r.finishedPrice);
+        cur.maxFinished = Math.max(cur.maxFinished, r.finishedPrice);
+        if (r.date > cur.lastDate) {
+            cur.lastDate = r.date;
+            cur.priceWithDisc = r.priceWithDisc;
+            cur.spp = r.spp;
+            cur.finishedPrice = r.finishedPrice;
+        }
+    }
+    return [...acc.values()].sort((a, b) => a.article.localeCompare(b.article, 'ru'));
+}

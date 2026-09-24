@@ -14,6 +14,9 @@ import {
     getGoodByNmId,
     getRegionSales,
     getWarehouseRemains,
+    groupBuyerPrices,
+    listStatOrders,
+    STAT_WINDOW_DAYS,
     groupRegionSales,
     listFbsOrders,
     splitRemains,
@@ -597,4 +600,74 @@ export function registerReadTools(server: McpServer, actor: Actor): void {
             })
         )
     );
+
+    server.registerTool(
+        'wb_buyer_prices',
+        {
+            title: 'Цена, которую платит покупатель',
+            description:
+                'Фактическая цена покупателя по каждому товару — из заказов в официальной статистике WB: ' +
+                'цена в кабинете, скидка WB (СПП) и сколько человек реально заплатил. ' +
+                'Берите его вместо сайта Wildberries: витрина закрыта для программ и отвечает 403. ' +
+                'Цена есть только у товаров, которые заказывали за выбранные дни.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                days: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(STAT_WINDOW_DAYS)
+                    .optional()
+                    .describe(`За сколько последних дней смотреть заказы, по умолчанию 2, максимум ${STAT_WINDOW_DAYS}`),
+                nmId: z.number().int().positive().optional().describe('Только эта номенклатура'),
+                article: z.string().optional().describe('Часть артикула продавца, например «Ланолин»'),
+                limit: z.number().int().min(1).max(300).optional().describe('Сколько товаров показать, по умолчанию 100')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('wb_buyer_prices', async (args, extra) =>
+            overCabinets(actorOf(extra), args.cabinet, async cabinet => {
+                const days = args.days ?? 2;
+                const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 19);
+                const { rows, fetchedAt } = await listStatOrders(cabinet);
+
+                let prices = groupBuyerPrices(rows, since);
+                if (args.nmId !== undefined) prices = prices.filter(p => p.nmId === args.nmId);
+                // Сравниваем средствами JS: у кириллицы в регулярках \b не работает.
+                const needle = args.article?.trim().toLowerCase();
+                if (needle) prices = prices.filter(p => p.article.toLowerCase().includes(needle));
+
+                if (prices.length === 0) {
+                    return args.nmId !== undefined || needle
+                        ? `За ${days} дн. заказов по этому товару не было — цены покупателя нет. Увеличьте days.`
+                        : `За ${days} дн. заказов нет.`;
+                }
+
+                const asked = args.limit ?? 100;
+                const shown = prices.slice(0, asked);
+                const rub = (v: number): string => `${Math.round(v).toLocaleString('ru-RU')} ₽`;
+                const lines = shown.map(p => {
+                    const spread = p.minFinished === p.maxFinished ? '' : `, за период ${rub(p.minFinished)}–${rub(p.maxFinished)}`;
+                    return (
+                        `${p.article} (nmId ${p.nmId}) — покупатель платит ${rub(p.finishedPrice)}` +
+                        ` | в кабинете ${rub(p.priceWithDisc)}, СПП ${p.spp}%${spread}` +
+                        ` | заказов ${p.orders}, последний ${p.lastDate.slice(0, 16).replace('T', ' ')}`
+                    );
+                });
+
+                const age = Math.round((Date.now() - fetchedAt) / 60_000);
+                return [
+                    `Товаров с заказами за ${days} дн.: ${prices.length}` +
+                        (prices.length > shown.length ? ` — показано ${shown.length}, увеличьте limit` : ''),
+                    '',
+                    ...lines,
+                    '',
+                    'Цена покупателя — из последнего заказа: цена в кабинете минус скидка WB (СПП).',
+                    'Скидку WB Кошелька статистика отдельно не показывает, её здесь нет.',
+                    `Данные WB приходят с задержкой около получаса; выгрузка сделана ${age === 0 ? 'только что' : `${age} мин назад`}.`
+                ].join('\n');
+            })
+        )
+    );
 }
+
