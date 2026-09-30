@@ -3,7 +3,6 @@ import { audit, type AuditOutcome } from '../../audit.js';
 import { actorFromAuthInfo, type Actor } from '../../auth/provider.js';
 import { DraftError } from '../../drafts.js';
 import { logger } from '../../logger.js';
-import { WbApiError } from '../../wb/client.js';
 import { CabinetError } from '../../wb/cabinets.js';
 
 export interface CallExtra {
@@ -15,6 +14,23 @@ export interface ToolResult {
     isError?: boolean;
     // SDK ждёт результат с открытой формой — без индексной сигнатуры типы не сходятся.
     [key: string]: unknown;
+}
+
+/**
+ * Понятный текст из ошибки любого источника.
+ *
+ * У ошибок Wildberries, Ozon, 1С и Nepsell есть toUserMessage() — объяснение,
+ * что случилось и что делать. До 30.09.2026 его вызывали только для WB, а
+ * остальные доходили до человека сырыми: от Nepsell при сбое прилетала
+ * HTML-страница nginx, и Claude сотрудника пересказывал её как мог.
+ */
+export function explainError(e: unknown): string {
+    if (hasUserMessage(e)) return e.toUserMessage();
+    return e instanceof Error ? e.message : String(e);
+}
+
+function hasUserMessage(e: unknown): e is Error & { toUserMessage(): string } {
+    return e instanceof Error && typeof (e as { toUserMessage?: unknown }).toUserMessage === 'function';
 }
 
 export const text = (value: string): ToolResult => ({ content: [{ type: 'text', text: value }] });
@@ -72,12 +88,20 @@ export function guarded<A>(name: string, handler: (args: A, extra: CallExtra) =>
             record(name, args, extra, result.isError === true ? 'denied' : 'ok', startedAt);
             return result;
         } catch (e) {
+            // Не тот кабинет — это отказ по доступу, а не поломка: в журнале
+            // он должен стоять рядом с другими отказами, а не среди ошибок.
+            if (e instanceof CabinetError) {
+                record(name, args, extra, 'denied', startedAt);
+                return fail(e.message);
+            }
             record(name, args, extra, 'error', startedAt);
-            if (e instanceof WbApiError) {
-                logger.warn({ tool: name, status: e.status, path: e.path }, 'wb error in tool');
+            if (e instanceof DraftError) return fail(e.message);
+            if (hasUserMessage(e)) {
+                // Упала или отказала площадка — это ожидаемо, а не ошибка в нашем коде.
+                const status = (e as { status?: unknown }).status;
+                logger.warn({ tool: name, source: e.name, status, err: e.message.slice(0, 300) }, 'source error in tool');
                 return fail(e.toUserMessage());
             }
-            if (e instanceof DraftError || e instanceof CabinetError) return fail(e.message);
             logger.error({ tool: name, err: e }, 'tool failed');
             return fail(`Инструмент ${name} завершился ошибкой: ${e instanceof Error ? e.message : String(e)}`);
         }

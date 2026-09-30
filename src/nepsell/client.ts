@@ -15,7 +15,8 @@
  * Ветка /api/v1 обслуживает их собственный интерфейс по сессии, это не
  * публичный договор, и трогать её нельзя: сломается при их обновлении.
  */
-import { TokenBucket } from '../wb/ratelimit.js';
+import { logger } from '../logger.js';
+import { TokenBucket, sleep } from '../wb/ratelimit.js';
 
 const BASE = 'https://nepsell.ru/api/a1';
 
@@ -39,33 +40,92 @@ export class NepsellError extends Error {
             case 403:
                 return 'Nepsell запретил доступ (403). Похоже, у тарифа нет прав на этот раздел.';
             case 400:
-                return `Nepsell отклонил запрос (400): ${this.message}`;
+            case 422:
+                return `Nepsell не принял параметры запроса (${this.status}): ${this.message}`;
+            case 408:
+                return 'Nepsell не ответил за 90 секунд — отчёт слишком тяжёлый или у них перегрузка. Возьмите период короче или повторите позже.';
+            case 502:
+            case 503:
+            case 504:
+                return `Nepsell сейчас не отвечает (${this.status}) — сбой на их стороне, запрос уже повторён трижды. Попробуйте через несколько минут.`;
+            case 0:
+                return `Не удалось связаться с Nepsell: ${this.message}`;
             default:
                 return `Nepsell вернул ошибку ${this.status} на ${this.path}: ${this.message}`;
         }
     }
 }
 
-async function post<T>(token: string, path: string, body: unknown): Promise<T> {
-    await bucket.take(1);
-    const res = await fetch(BASE + path, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body ?? {}),
-        signal: AbortSignal.timeout(90_000)
-    });
-    if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        let detail = text;
-        try {
-            const parsed = JSON.parse(text) as { detail?: unknown };
-            if (typeof parsed.detail === 'string') detail = parsed.detail.split('\n')[0] ?? text;
-        } catch {
-            /* тело не JSON — оставляем как есть */
+/**
+ * Сбои на их стороне, после которых разумно попробовать ещё раз. 25 и 28
+ * сентября 2026 утром их nginx десять раз отдал 502 подряд. Все запросы здесь —
+ * чтение отчётов, повтор безопасен.
+ */
+const TRANSIENT = new Set([502, 503, 504]);
+const RETRY_DELAYS_MS = [3_000, 8_000];
+
+/**
+ * Текст ошибки из тела ответа.
+ *
+ * Nepsell написан на FastAPI: ошибку проверки параметров он присылает
+ * многострочной строкой «1 validation error:\n start_date\n Input should be…».
+ * Раньше бралась только первая строка — ровно та, где причины нет, — и до
+ * человека доходило бесполезное «1 validation error:». Теперь берётся целиком.
+ */
+function describeBody(text: string, status: number): string {
+    const t = text.trim();
+    // При падении их nginx отдаёт HTML-страницу. Модели она ничего не скажет.
+    if (t.startsWith('<')) return `сервер Nepsell не ответил (${status})`;
+    try {
+        const d = (JSON.parse(t) as { detail?: unknown }).detail;
+        if (typeof d === 'string') return d.replace(/\s+/g, ' ').trim();
+        if (Array.isArray(d)) {
+            return d
+                .map(x => {
+                    const o = x as { loc?: unknown[]; msg?: string };
+                    const where = (o.loc ?? []).filter(p => p !== 'body').join('.');
+                    return where ? `${where}: ${o.msg ?? ''}` : (o.msg ?? '');
+                })
+                .join('; ');
         }
-        throw new NepsellError(detail.slice(0, 300) || res.statusText, res.status, path);
+    } catch {
+        /* тело не JSON — оставляем как есть */
     }
-    return (await res.json()) as T;
+    return t;
+}
+
+async function post<T>(token: string, path: string, body: unknown): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+        await bucket.take(1);
+        let res: Response;
+        try {
+            res = await fetch(BASE + path, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify(body ?? {}),
+                signal: AbortSignal.timeout(90_000)
+            });
+        } catch (cause) {
+            const err = cause as Error;
+            // Тайм-аут не повторяем: 90 секунд уже потрачены, второй заход съел
+            // бы ещё столько же, и Claude сотрудника бросил бы ждать раньше.
+            const timedOut = err.name === 'TimeoutError' || err.name === 'AbortError';
+            if (!timedOut && attempt < RETRY_DELAYS_MS.length) {
+                await sleep(RETRY_DELAYS_MS[attempt]!);
+                continue;
+            }
+            throw new NepsellError(timedOut ? 'не ответил за 90 секунд' : err.message, timedOut ? 408 : 0, path);
+        }
+        if (res.ok) return (await res.json()) as T;
+
+        const text = await res.text().catch(() => '');
+        if (TRANSIENT.has(res.status) && attempt < RETRY_DELAYS_MS.length) {
+            logger.warn({ nepsell: true, path, status: res.status, attempt: attempt + 1 }, 'nepsell transient error, retrying');
+            await sleep(RETRY_DELAYS_MS[attempt]!);
+            continue;
+        }
+        throw new NepsellError(describeBody(text, res.status).slice(0, 500) || res.statusText, res.status, path);
+    }
 }
 
 // ─── Кабинеты ────────────────────────────────────────────────────────────────

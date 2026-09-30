@@ -34,6 +34,14 @@ export class OzonApiError extends Error {
         super(message);
         this.name = 'OzonApiError';
     }
+
+    /** Текст для человека. Тело ответа Ozon в 4xx обычно само объясняет причину — роль ключа, подписку. */
+    toUserMessage(): string {
+        if (this.status === 429) return `Ozon ограничил частоту запросов (429) на ${this.path}. Повторите через минуту.`;
+        if (this.status >= 500) return `Ozon сейчас не отвечает (${this.status}) на ${this.path} — сбой на их стороне. Попробуйте позже.`;
+        if (this.status === 401) return 'Ozon не принял ключ (401). Возможно, ключ API отозван в кабинете продавца.';
+        return `Ozon отказал (${this.status}) на ${this.path}: ${this.message}`;
+    }
 }
 
 async function post<T>(cabinet: OzonCabinet, path: string, body: unknown): Promise<T> {

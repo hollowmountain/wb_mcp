@@ -96,6 +96,15 @@ export class WbApiError extends Error {
             case 404:
                 return `WB не нашёл метод ${this.path} (404). Возможно, метод изменился — сверьтесь с dev.wildberries.ru.`;
             case 429:
+                if (this.category === 'statistics') {
+                    // Лимит считается на продавца, а не на наш токен: его делят все
+                    // сервисы с доступом к кабинету, включая Nepsell.
+                    const minutes = Math.max(1, Math.ceil((this.retryAfterSeconds ?? 300) / 60));
+                    return (
+                        'WB сейчас не отдаёт статистику: лимит — один запрос в пять минут на продавца, ' +
+                        `и его делят все сервисы, подключённые к кабинету. Повторите через ${minutes} мин.`
+                    );
+                }
                 return `WB ограничил частоту запросов (429). Повтор возможен через ${this.retryAfterSeconds ?? '?'} с.`;
             default:
                 return `WB вернул ошибку ${this.status} на ${this.path}: ${this.message}`;
@@ -113,6 +122,12 @@ interface RequestOptions {
     form?: FormData;
     /** Ответ — бинарный файл, а не JSON. */
     raw?: boolean;
+    /**
+     * На 429 не ждать, а сразу отдать ошибку. Нужно там, где ожидание
+     * длиннее терпения клиента: у статистики ведро пополняется раз в пять
+     * минут, и вызов честно ждал, когда Claude сотрудника уже бросил его.
+     */
+    impatient?: boolean;
 }
 
 function baseUrl(category: WbCategory): string {
@@ -191,6 +206,7 @@ async function request<T>(opts: RequestOptions): Promise<T> {
             const retry = Number(res.headers.get('X-Ratelimit-Retry') ?? '1');
             bucket.penalise(3);
             lastError = new WbApiError('Слишком много запросов', 429, opts.category, opts.path, undefined, retry);
+            if (opts.impatient) throw lastError;
             if (attempt < MAX_ATTEMPTS) {
                 await sleep(Math.min(retry, 30) * 1000);
                 continue;

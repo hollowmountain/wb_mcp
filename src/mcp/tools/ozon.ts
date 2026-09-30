@@ -18,7 +18,9 @@ import {
     type OzonCabinet
 } from '../../ozon/client.js';
 import { ctr, dailyStats, drr, hasPerf, listCampaigns, rollUpByCampaign } from '../../ozon/performance.js';
-import { actorOf, guarded, text, type ToolResult } from './common.js';
+import { logger } from '../../logger.js';
+import { CabinetError } from '../../wb/cabinets.js';
+import { actorOf, explainError, guarded, text, type ToolResult } from './common.js';
 
 const dash = '—';
 
@@ -36,21 +38,37 @@ function allowedOzon(actor: Actor): OzonCabinet[] {
     return all.filter(c => scope.has(c.slug));
 }
 
+/**
+ * Кабинет Ozon по тому, как его назвала модель.
+ *
+ * Модели путаются: пишут harbez вместо oz-harbez — так называется кабинет
+ * Wildberries — или берут подпись из Nepsell, «PixelTapic». За неделю до
+ * 30.09.2026 так ошиблись шесть раз, каждый раз лишний заход. Подбор идёт
+ * только среди кабинетов, открытых человеку, поэтому доступа не расширяет.
+ */
+function matchOzon(allowed: OzonCabinet[], slug: string): OzonCabinet | undefined {
+    const wanted = slug.trim().toLowerCase().replace(/^ozon[-_ ]?/, 'oz-');
+    const base = wanted.startsWith('oz-') ? wanted : `oz-${wanted}`;
+    for (const candidate of [wanted, base, base.replace(/pixeltapic$/, 'pixeltap')]) {
+        const hit = allowed.find(c => c.slug === candidate);
+        if (hit) return hit;
+    }
+    return undefined;
+}
+
 function resolve(actor: Actor, slug?: string): OzonCabinet[] {
     const allowed = allowedOzon(actor);
     if (allowed.length === 0) {
-        throw new Error('Кабинеты Ozon вам не открыты. Обратитесь к администратору.');
+        throw new CabinetError('Кабинеты Ozon вам не открыты. Обратитесь к администратору.');
     }
     if (!slug) return allowed;
-    const wanted = slug.trim().toLowerCase();
-    const one = allowed.find(c => c.slug === wanted);
+    const one = matchOzon(allowed, slug);
     if (!one) {
-        throw new Error(`Кабинет «${slug}» вам не доступен. Доступны: ${allowed.map(c => c.slug).join(', ')}`);
+        throw new CabinetError(`Кабинет «${slug}» вам не доступен. Доступны: ${allowed.map(c => c.slug).join(', ')}`);
     }
     return [one];
 }
 
-const cabinetArg = z.string().optional().describe('Кабинет Ozon. Не указан — по всем доступным.');
 
 const heading = (cabinet: OzonCabinet, total: number): string =>
     total === 1 ? '' : `━━ ${cabinet.slug} ━━\n`;
@@ -66,7 +84,8 @@ async function overCabinets(
             try {
                 return heading(c, cabinets.length) + (await run(c));
             } catch (e) {
-                return `${heading(c, cabinets.length)}Ошибка: ${e instanceof Error ? e.message : String(e)}`;
+                logger.warn({ cabinet: c.slug, err: e instanceof Error ? e.message.slice(0, 300) : String(e) }, 'cabinet failed');
+                return `${heading(c, cabinets.length)}Ошибка: ${explainError(e)}`;
             }
         })
     );
@@ -103,7 +122,8 @@ async function overCabinetsInTurn(
         try {
             blocks.push(heading(c, cabinets.length) + (await run(c)));
         } catch (e) {
-            blocks.push(`${heading(c, cabinets.length)}Ошибка: ${e instanceof Error ? e.message : String(e)}`);
+            logger.warn({ cabinet: c.slug, err: e instanceof Error ? e.message.slice(0, 300) : String(e) }, 'cabinet failed');
+            blocks.push(`${heading(c, cabinets.length)}Ошибка: ${explainError(e)}`);
         }
     }
     return text(blocks.join('\n\n'));
@@ -111,6 +131,13 @@ async function overCabinetsInTurn(
 
 export function registerOzonTools(server: McpServer, actor: Actor): void {
     if (allowedOzon(actor).length === 0) return;
+
+    // Слаги называем прямо: без этого модель пишет harbez — имя кабинета
+    // Wildberries — и получает отказ. Перечислены только кабинеты этого человека.
+    const cabinetArg = z
+        .string()
+        .optional()
+        .describe(`Кабинет Ozon, слаг с приставкой oz-: ${allowedOzon(actor).map(c => c.slug).join(', ')}. Не указан — по всем доступным.`);
 
     server.registerTool(
         'ozon_cabinets',

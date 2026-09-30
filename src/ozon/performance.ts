@@ -27,6 +27,14 @@ export class OzonPerfError extends Error {
         super(message);
         this.name = 'OzonPerfError';
     }
+
+    /** Текст для человека. Тело ответа Ozon в 4xx обычно само объясняет причину — роль ключа, подписку. */
+    toUserMessage(): string {
+        if (this.status === 429) return `Реклама Ozon ограничила частоту запросов (429) на ${this.path}. Повторите через минуту.`;
+        if (this.status >= 500) return `Реклама Ozon сейчас не отвечает (${this.status}) на ${this.path} — сбой на их стороне. Попробуйте позже.`;
+        if (this.status === 401) return 'Реклама Ozon не приняла ключ (401). Проверьте ключ Performance API.';
+        return `Реклама Ozon отказала (${this.status}) на ${this.path}: ${this.message}`;
+    }
 }
 
 interface CachedToken {

@@ -1,5 +1,5 @@
 import type { Cabinet } from './cabinets.js';
-import { wbChat, wbChatFile, wbCommon, wbDataJson, wbFeedbacks, wbJson } from './client.js';
+import { WbApiError, wbChat, wbChatFile, wbCommon, wbDataJson, wbFeedbacks, wbJson } from './client.js';
 import { sleep } from './ratelimit.js';
 
 // ─── Общие типы ──────────────────────────────────────────────────────────────
@@ -645,27 +645,53 @@ export interface StatOrder {
 export const STAT_WINDOW_DAYS = 7;
 
 /**
- * Лимит statistics-api — один запрос в пять минут на кабинет. Без кэша второй
- * вопрос подряд ждал бы пять минут и падал по тайм-ауту. Десять минут — с
- * запасом над лимитом и достаточно свежо: WB и сам отдаёт статистику с
- * задержкой около получаса.
+ * Лимит statistics-api — один запрос в пять минут, и считается он на продавца
+ * целиком: его делят все сервисы с доступом к кабинету, включая Nepsell. Без
+ * кэша второй вопрос подряд ждал бы пять минут. Десять минут свежести — с
+ * запасом над лимитом, и WB сам отдаёт статистику с задержкой около получаса.
  */
 const STAT_TTL_MS = 10 * 60 * 1000;
+/** Сколько держать прошлую выгрузку про запас — на случай, когда WB не даёт новую. */
+const STAT_STALE_MS = 6 * 60 * 60 * 1000;
+/**
+ * Дольше этого вопрос ждать не должен. 24.09.2026 один вызов провисел ровно
+ * пять минут: WB ответил 429, клиент оштрафовал ведро и честно ждал, пока оно
+ * пополнится, — а Claude сотрудника к тому времени давно бросил ждать.
+ */
+const STAT_MAX_WAIT_MS = 20_000;
 const statCache = new Map<string, { at: number; rows: StatOrder[] }>();
 // Два вопроса одновременно не должны устроить два запроса: второй встал бы
 // в ведро на пять минут. Ждут один и тот же.
 const statPending = new Map<string, Promise<{ at: number; rows: StatOrder[] }>>();
 
-export async function listStatOrders(cabinet: Cabinet): Promise<{ rows: StatOrder[]; fetchedAt: number }> {
+export interface StatOrdersResult {
+    rows: StatOrder[];
+    fetchedAt: number;
+    /** WB новую выгрузку не дал — отдана прошлая. */
+    stale: boolean;
+}
+
+/** Прошлая выгрузка, если она не слишком стара; иначе честный отказ с понятной причиной. */
+function staleOr429(hit: { at: number; rows: StatOrder[] } | undefined, retrySec?: number): StatOrdersResult {
+    if (hit && Date.now() - hit.at < STAT_STALE_MS) return { rows: hit.rows, fetchedAt: hit.at, stale: true };
+    throw new WbApiError('Слишком много запросов', 429, 'statistics', '/api/v1/supplier/orders', undefined, retrySec ?? 300);
+}
+
+export async function listStatOrders(cabinet: Cabinet): Promise<StatOrdersResult> {
     const hit = statCache.get(cabinet.slug);
-    if (hit && Date.now() - hit.at < STAT_TTL_MS) return { rows: hit.rows, fetchedAt: hit.at };
+    if (hit && Date.now() - hit.at < STAT_TTL_MS) return { rows: hit.rows, fetchedAt: hit.at, stale: false };
 
     let pending = statPending.get(cabinet.slug);
     if (!pending) {
+        // Ведро пустое после недавнего 429 — не встаём в него на пять минут.
+        const waitMs = cabinet.buckets.statistics.waitMs(1);
+        if (waitMs > STAT_MAX_WAIT_MS) return staleOr429(hit, Math.ceil(waitMs / 1000));
+
         const from = new Date(Date.now() - STAT_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
         pending = wbJson<StatOrder[]>(cabinet, 'statistics', {
             path: '/api/v1/supplier/orders',
-            query: { dateFrom: from, flag: 0 }
+            query: { dateFrom: from, flag: 0 },
+            impatient: true
         })
             .then(rows => {
                 const entry = { at: Date.now(), rows: Array.isArray(rows) ? rows : [] };
@@ -675,8 +701,13 @@ export async function listStatOrders(cabinet: Cabinet): Promise<{ rows: StatOrde
             .finally(() => statPending.delete(cabinet.slug));
         statPending.set(cabinet.slug, pending);
     }
-    const entry = await pending;
-    return { rows: entry.rows, fetchedAt: entry.at };
+    try {
+        const entry = await pending;
+        return { rows: entry.rows, fetchedAt: entry.at, stale: false };
+    } catch (e) {
+        if (e instanceof WbApiError && e.status === 429) return staleOr429(hit, e.retryAfterSeconds);
+        throw e;
+    }
 }
 
 export interface BuyerPrice {

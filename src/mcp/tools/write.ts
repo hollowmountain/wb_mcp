@@ -5,6 +5,7 @@ import type { Actor } from '../../auth/provider.js';
 import { audit } from '../../audit.js';
 import { canUseCabinet, allowedCabinets, hasAnyCabinet, resolveCabinet } from '../../access.js';
 import { describeAreas } from '../../areas.js';
+import { config } from '../../config.js';
 import {
     assertCanSend,
     createDraft,
@@ -50,9 +51,15 @@ export function registerWhoAmI(server: McpServer): void {
         },
         guarded('wb_whoami', async (_args, extra) => {
             const actor = actorOf(extra);
-            const cabinets = allowedCabinets(actor)
-                .map(c => `  ${c.slug} — ${c.label}${c.info.readOnly ? ' (токен только на чтение)' : ''}`)
-                .join('\n');
+            // Инструмент показывают всем, в том числе тем, у кого только Ozon, —
+            // а allowedCabinets у них бросает ошибку. До 30.09.2026 wb_whoami
+            // падал ровно у тех, кому он нужнее всего.
+            const wb = hasAnyCabinet(actor)
+                ? allowedCabinets(actor)
+                      .map(c => `  ${c.slug} — ${c.label}${c.info.readOnly ? ' (токен только на чтение)' : ''}`)
+                      .join('\n')
+                : '  нет';
+            const ozon = config.ozon.filter(c => actor.cabinets === null || actor.cabinets.includes(c.slug));
             return text(
                 [
                     `Пользователь: ${actor.email}`,
@@ -60,7 +67,9 @@ export function registerWhoAmI(server: McpServer): void {
                     `Ваши области: ${describeAreas(actor.areas)}`,
                     `Разрешения токена доступа: ${actor.scopes.join(', ') || 'нет'}`,
                     'Кабинеты Wildberries:',
-                    cabinets
+                    wb,
+                    'Кабинеты Ozon:',
+                    ozon.length > 0 ? ozon.map(c => `  ${c.slug}`).join('\n') : '  нет'
                 ].join('\n')
             );
         })

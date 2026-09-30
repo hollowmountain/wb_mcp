@@ -46,7 +46,8 @@ import {
     formatStockRow,
     joinBlocks
 } from '../format.js';
-import { actorOf, guarded, text, toUnixSeconds, type ToolResult } from './common.js';
+import { logger } from '../../logger.js';
+import { actorOf, explainError, guarded, text, toUnixSeconds, type ToolResult } from './common.js';
 import { locateFeedback, locateQuestion } from './resolve.js';
 
 const chatCursorKey = (slug: string): string => `chat.events.cursor.${slug}`;
@@ -113,8 +114,10 @@ async function overCabinets(
                 return heading(cabinet, cabinets.length) + (await run(cabinet));
             } catch (e) {
                 // Падение одного кабинета не должно скрывать данные остальных.
-                const message = e instanceof Error ? e.message : String(e);
-                return `${heading(cabinet, cabinets.length)}Ошибка: ${message}`;
+                // Но и тонуть молча не должно: вызов целиком считается удачным,
+                // и без этой строки в логе сбой кабинета не видно вообще.
+                logger.warn({ cabinet: cabinet.slug, err: e instanceof Error ? e.message.slice(0, 300) : String(e) }, 'cabinet failed');
+                return `${heading(cabinet, cabinets.length)}Ошибка: ${explainError(e)}`;
             }
         })
     );
@@ -629,7 +632,7 @@ export function registerReadTools(server: McpServer, actor: Actor): void {
             overCabinets(actorOf(extra), args.cabinet, async cabinet => {
                 const days = args.days ?? 2;
                 const since = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 19);
-                const { rows, fetchedAt } = await listStatOrders(cabinet);
+                const { rows, fetchedAt, stale } = await listStatOrders(cabinet);
 
                 let prices = groupBuyerPrices(rows, since);
                 if (args.nmId !== undefined) prices = prices.filter(p => p.nmId === args.nmId);
@@ -664,7 +667,9 @@ export function registerReadTools(server: McpServer, actor: Actor): void {
                     '',
                     'Цена покупателя — из последнего заказа: цена в кабинете минус скидка WB (СПП).',
                     'Скидку WB Кошелька статистика отдельно не показывает, её здесь нет.',
-                    `Данные WB приходят с задержкой около получаса; выгрузка сделана ${age === 0 ? 'только что' : `${age} мин назад`}.`
+                    stale
+                        ? `WB сейчас не отдаёт свежую статистику (лимит на продавца), поэтому показана прошлая выгрузка — ${age} мин назад.`
+                        : `Данные WB приходят с задержкой около получаса; выгрузка сделана ${age === 0 ? 'только что' : `${age} мин назад`}.`
                 ].join('\n');
             })
         )

@@ -37,6 +37,13 @@ export class TokenBucket {
         }
     }
 
+    /** Сколько миллисекунд ждать до освобождения cost мест. Ничего не списывает. */
+    waitMs(cost = 1): number {
+        this.refill();
+        if (this.tokens >= cost) return 0;
+        return Math.ceil(((cost - this.tokens) / this.refillPerSecond) * 1000);
+    }
+
     /** Списывает штраф без ожидания — например, после 429 от WB. */
     penalise(cost: number): void {
         this.refill();

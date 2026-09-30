@@ -927,9 +927,14 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             // в регулярных выражениях кириллицу не знают, и такой поиск молча
             // ничего не находил бы.
             const needle = args.find?.trim().toLowerCase();
+            // Разделы почти никогда не называются так, как в интерфейсе. Главная
+            // ловушка — заказ-наряды: в базе это Document_ЗаданиеНаРаботу, а по
+            // слову «наряд» находится только сдельный наряд, совсем другой документ.
+            // 15.09.2026 на этом я сам решил, что заказ-наряды не опубликованы.
+            const alsoMatch = needle && /наряд/.test(needle) ? 'заданиенаработу' : null;
             const rows = all
                 .filter(e => (prefix === 'Register' ? e.includes('Register_') : e.startsWith(prefix)))
-                .filter(e => !needle || e.toLowerCase().includes(needle))
+                .filter(e => !needle || e.toLowerCase().includes(needle) || (alsoMatch !== null && e.toLowerCase().includes(alsoMatch)))
                 .sort();
 
             if (rows.length === 0) {
