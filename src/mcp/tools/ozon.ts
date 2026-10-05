@@ -5,7 +5,8 @@ import type { Actor } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import {
     getOzonAnalytics,
-    getOzonFinanceTotals,
+    getOzonBalance,
+    getOzonRealization,
     getAllOzonPrices,
     getOzonChatHistory,
     getAllOzonStocks,
@@ -79,17 +80,29 @@ async function overCabinets(
     run: (cabinet: OzonCabinet) => Promise<string>
 ): Promise<ToolResult> {
     const cabinets = resolve(actor, slug);
+    let failed = 0;
     const blocks = await Promise.all(
         cabinets.map(async c => {
             try {
                 return heading(c, cabinets.length) + (await run(c));
             } catch (e) {
+                failed++;
                 logger.warn({ cabinet: c.slug, err: e instanceof Error ? e.message.slice(0, 300) : String(e) }, 'cabinet failed');
                 return `${heading(c, cabinets.length)}Ошибка: ${explainError(e)}`;
             }
         })
     );
-    return text(blocks.join('\n\n'));
+    return finish(blocks, failed === cabinets.length);
+}
+
+/**
+ * Если упали все кабинеты, вызов целиком — сбой. Раньше он писался в журнал
+ * как удачный: 05.10.2026 ozon_finance получил от Ozon «404 page not found»,
+ * а в журнале стояло ok, и поломку было не найти.
+ */
+function finish(blocks: string[], allFailed: boolean): ToolResult {
+    const result = text(blocks.join('\n\n'));
+    return allFailed ? { ...result, isError: true, sourceFailed: true } : result;
 }
 
 const rub = (v: string | undefined, cur?: string): string =>
@@ -118,16 +131,56 @@ async function overCabinetsInTurn(
 ): Promise<ToolResult> {
     const cabinets = resolve(actor, slug);
     const blocks: string[] = [];
+    let failed = 0;
     for (const c of cabinets) {
         try {
             blocks.push(heading(c, cabinets.length) + (await run(c)));
         } catch (e) {
+            failed++;
             logger.warn({ cabinet: c.slug, err: e instanceof Error ? e.message.slice(0, 300) : String(e) }, 'cabinet failed');
             blocks.push(`${heading(c, cabinets.length)}Ошибка: ${explainError(e)}`);
         }
     }
-    return text(blocks.join('\n\n'));
+    return finish(blocks, failed === cabinets.length);
 }
+
+/** Как Ozon называет услуги в балансе — и как это сказать по-русски. */
+const SERVICE_NAMES: Record<string, string> = {
+    pay_per_click: 'реклама: оплата за клик',
+    promotion_with_cost_per_order: 'реклама: оплата за заказ',
+    logistics: 'логистика',
+    reverse_logistics: 'обратная логистика',
+    courier_client_reinvoice: 'курьерская доставка покупателю',
+    delivery_to_handover_place_by_ozon: 'доставка до места передачи',
+    cross_docking: 'кросс-докинг',
+    acquiring: 'эквайринг',
+    product_placement_in_ozon_warehouses: 'размещение на складах Ozon',
+    stock_insurance: 'страхование остатков',
+    goods_transfer_between_ozon_warehouses: 'перемещение между складами',
+    temporary_placement_agent: 'временное размещение',
+    booking_space_and_staff_for_partial_shipment: 'бронирование места под поставку',
+    decompensation_and_return_to_warehouse: 'декомпенсация и возврат на склад',
+    partner_returns_cancellations_processing: 'обработка возвратов и отмен',
+    drop_off_processing_by_partners: 'приём отгрузок в пунктах',
+    ozon_warehouse_pickup: 'вывоз со склада Ozon',
+    ozon_warehouse_pickup_assortment: 'вывоз со склада Ozon (ассортимент)',
+    item_packing: 'упаковка',
+    packing_by_agents: 'упаковка агентами',
+    packing_package: 'упаковочный материал',
+    product_disposal: 'утилизация',
+    defect_fine_shipment_delay_rated: 'штраф за просрочку отгрузки',
+    premium_subscription: 'подписка Premium',
+    analytics_premium: 'Premium-аналитика',
+    offsets: 'взаимозачёты',
+    ozon_tech_offsets: 'взаимозачёты Ozon Технологии'
+};
+
+const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const monthLabel = (y: number, m: number): string => `${MONTHS[m - 1]} ${y}`;
+const shiftMonth = (y: number, m: number, by: number): { year: number; month: number } => {
+    const idx = y * 12 + (m - 1) + by;
+    return { year: Math.floor(idx / 12), month: (idx % 12) + 1 };
+};
 
 export function registerOzonTools(server: McpServer, actor: Actor): void {
     if (allowedOzon(actor).length === 0) return;
@@ -198,11 +251,17 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                         // free_to_sell, то есть без резерва: числа законно
                         // разные, и без подписи их принимают за расхождение.
                         `   На складе с резервом: ${total} шт.${byType.length ? ` — ${byType.join(', ')}` : ''}`,
-                        `   Цена: ${rub(p?.price, p?.currency_code)}${p?.old_price && p.old_price !== '0' ? ` (до скидки ${rub(p.old_price, p.currency_code)})` : ''}`
+                        `   Цена в кабинете: ${rub(p?.price, p?.currency_code)}${p?.old_price && p.old_price !== '0' ? ` (зачёркнутая ${rub(p.old_price, p.currency_code)})` : ''}`
                     ].join('\n');
                 });
                 const tail = rows.length > want ? `\n\n… ещё товаров: ${rows.length - want}` : '';
-                return `Товаров: ${rows.length}\n\n${lines.join('\n')}${tail}`;
+                // Без этой строки модель принимает цену продавца за цену на сайте.
+                // Ozon докрывает своими скидками больше половины цены, так что
+                // разница огромная — 05.10.2026 на этом РОП строила контроль цен.
+                const hint =
+                    '\n\nЭто цена продавца. Покупатель платит меньше: Ozon даёт скидки за свой счёт. ' +
+                    'Сколько покупатели платили на деле — ozon_buyer_prices.';
+                return `Товаров: ${rows.length}\n\n${lines.join('\n')}${tail}${hint}`;
             })
         )
     );
@@ -442,8 +501,9 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
         {
             title: 'Ozon: расчёты с площадкой',
             description:
-                'Что Ozon начислил и что удержал за период: продажи, комиссия, логистика и обработка, ' +
-                'возвраты, услуги, компенсации. Внизу — сколько остаётся продавцу.',
+                'Расчёты с Ozon за период: продажи — с разбивкой, сколько заплатили покупатели и сколько ' +
+                'докрыл Ozon своими скидками, — вознаграждение Ozon, возвраты, услуги по видам, начислено ' +
+                'и выплачено, остаток на начало и конец. Период длиннее месяца собирается по частям.',
             inputSchema: {
                 cabinet: cabinetArg,
                 dateFrom: dateArg('Начало периода: 2026-08-01'),
@@ -453,21 +513,126 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
         },
         guarded('ozon_finance', async (args, extra) =>
             overCabinetsInTurn(actorOf(extra), args.cabinet, async cabinet => {
-                const f = await getOzonFinanceTotals(cabinet, { from: args.dateFrom, to: args.dateTo });
-                const share = f.accrualsForSale > 0 ? Math.round((f.net / f.accrualsForSale) * 100) : 0;
-                const line = (label: string, v: number): string => `${label.padEnd(26, '.')} ${money(v)}`;
+                const b = await getOzonBalance(cabinet, { from: args.dateFrom, to: args.dateTo });
+                const line = (label: string, v: number): string => `${label.padEnd(34, '.')} ${money(v)}`;
+                const servicesTotal = b.services.reduce((s, x) => s + x.amount, 0);
+                // Услуги отсортированы от самых крупных удержаний; хвост сворачиваем.
+                const top = b.services.filter(x => Math.round(x.amount) !== 0).slice(0, 8);
+                const rest = b.services.length - top.length;
+                const restSum = servicesTotal - top.reduce((s, x) => s + x.amount, 0);
+                const paidShare = b.sales.amount > 0 ? Math.round((b.sales.revenue / b.sales.amount) * 100) : 0;
                 return [
-                    `${args.dateFrom} — ${args.dateTo}`,
+                    `${b.from} — ${b.to}`,
                     '',
-                    line('Начислено за продажи', f.accrualsForSale),
-                    line('Комиссия площадки', f.saleCommission),
-                    line('Обработка и доставка', f.processingAndDelivery),
-                    line('Возвраты и отмены', f.refundsAndCancellations),
-                    line('Услуги', f.servicesAmount),
-                    line('Компенсации', f.compensationAmount),
-                    line('Прочее', f.othersAmount),
+                    line('Продажи по цене продавца', b.sales.amount),
+                    line('   из них заплатили покупатели', b.sales.revenue),
+                    line('   докрыл Ozon баллами за скидки', b.sales.points),
+                    ...(Math.round(b.sales.partners) !== 0 ? [line('   партнёрские программы', b.sales.partners)] : []),
+                    line('Вознаграждение Ozon', b.sales.fee),
+                    line('Возвраты', b.returns.amount),
+                    ...(Math.round(b.returns.fee) !== 0 ? [line('   вернулось вознаграждения', b.returns.fee)] : []),
+                    line('Услуги и удержания', servicesTotal),
+                    ...top.map(x => line(`   ${SERVICE_NAMES[x.name] ?? x.name}`, x.amount)),
+                    ...(rest > 0 ? [line(`   прочие (${rest})`, restSum)] : []),
                     '',
-                    `К перечислению: ${money(f.net)} — это ${share}% от начисленного`
+                    line('Начислено за период', b.accrued),
+                    line('Выплачено', b.paid),
+                    `Остаток: на начало ${money(b.openingBalance)}, на конец ${money(b.closingBalance)}`,
+                    '',
+                    `Покупатели заплатили ${paidShare}% от цены продавца, остальное Ozon докрыл баллами за свои скидки.`
+                ].join('\n');
+            })
+        )
+    );
+
+    server.registerTool(
+        'ozon_buyer_prices',
+        {
+            title: 'Ozon: цена, которую платит покупатель',
+            description:
+                'Сколько покупатели фактически платили за каждый товар — из отчёта о реализации Ozon за месяц: ' +
+                'цена продавца, сколько заплатил покупатель и какую долю докрыл Ozon своими скидками. Ozon-аналог ' +
+                'wb_buyer_prices. Берите его, а не ozon_products, когда нужна цена для покупателя: в API цен Ozon ' +
+                'её больше нет, а скидки Ozon персональные — одной цены на сайте не существует. Отчёт выходит ' +
+                'после закрытия месяца; по дням Ozon отдаёт его только на подписке Premium Plus.',
+            inputSchema: {
+                cabinet: cabinetArg,
+                month: z
+                    .string()
+                    .regex(/^\d{4}-\d{2}$/, 'Месяц в виде 2026-09')
+                    .optional()
+                    .describe('Месяц отчёта, например 2026-09. По умолчанию — последний закрытый.'),
+                search: z.string().optional().describe('Часть артикула продавца или названия товара'),
+                limit: z.number().int().min(1).max(300).optional().describe('Сколько товаров показать, по умолчанию 50')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('ozon_buyer_prices', async (args, extra) =>
+            overCabinetsInTurn(actorOf(extra), args.cabinet, async cabinet => {
+                const nowMsk = new Date(Date.now() + 3 * 3_600_000);
+                const asked = args.month
+                    ? { year: Number(args.month.slice(0, 4)), month: Number(args.month.slice(5, 7)) }
+                    : shiftMonth(nowMsk.getUTCFullYear(), nowMsk.getUTCMonth() + 1, -1);
+
+                let report = await getOzonRealization(cabinet, asked.year, asked.month);
+                let note = '';
+                // В первые дни месяца отчёт за прошлый ещё не готов — берём позапрошлый и говорим об этом.
+                if (!report && !args.month) {
+                    const earlier = shiftMonth(asked.year, asked.month, -1);
+                    report = await getOzonRealization(cabinet, earlier.year, earlier.month);
+                    if (report) note = `Отчёт за ${monthLabel(asked.year, asked.month)} Ozon ещё не выпустил — показан ${monthLabel(earlier.year, earlier.month)}.`;
+                }
+                if (!report) {
+                    return `Отчёта о реализации за ${monthLabel(asked.year, asked.month)} нет: месяц ещё не закрыт или продаж не было.`;
+                }
+
+                const needle = args.search?.trim().toLowerCase();
+                const items = needle
+                    ? report.items.filter(i => i.offerId.toLowerCase().includes(needle) || i.name.toLowerCase().includes(needle))
+                    : report.items;
+                const label = monthLabel(report.year, report.month);
+                if (items.length === 0) return `${note ? note + '\n' : ''}В отчёте за ${label} по запросу «${args.search}» продаж нет.`;
+
+                const prices = await getAllOzonPrices(cabinet);
+                const nowPrice = new Map(prices.map(p => [p.offer_id, p.price]));
+                const rubN = (v: number): string => `${Math.round(v).toLocaleString('ru-RU')} \u20bd`;
+                const shown = items.slice(0, args.limit ?? 50);
+                const lines = shown.map(i => {
+                    const share = i.sellerSum > 0 ? Math.round((1 - i.buyerSum / i.sellerSum) * 100) : 0;
+                    const now = nowPrice.get(i.offerId)?.price;
+                    return (
+                        `${i.offerId} — покупатель платил в среднем ${rubN(i.buyerSum / i.qty)} (продано ${i.qty} шт.)` +
+                        ` | цена продавца в среднем ${rubN(i.sellerSum / i.qty)}, скидка за счёт Ozon ${share}%` +
+                        (now ? ` | сейчас в кабинете ${rub(now)}` : '')
+                    );
+                });
+
+                // Доля по всему отчёту, а не по выборке: это фон для сравнения со свежей неделей.
+                const all = report.items.reduce((s, i) => ({ seller: s.seller + i.sellerSum, buyer: s.buyer + i.buyerSum }), { seller: 0, buyer: 0 });
+                const monthShare = all.seller > 0 ? Math.round((all.buyer / all.seller) * 100) : 0;
+                const yesterday = new Date(nowMsk.getTime() - 86_400_000).toISOString().slice(0, 10);
+                const weekAgo = new Date(nowMsk.getTime() - 7 * 86_400_000).toISOString().slice(0, 10);
+                let fresh = '';
+                try {
+                    const b = await getOzonBalance(cabinet, { from: weekAgo, to: yesterday });
+                    if (b.sales.amount > 0) {
+                        fresh = `За последние 7 дней по кабинету покупатели заплатили ${Math.round((b.sales.revenue / b.sales.amount) * 100)}% от цены продавца (в отчётном месяце — ${monthShare}%).`;
+                    }
+                } catch {
+                    /* свежая доля — подсказка, без неё отчёт всё равно верен */
+                }
+
+                return [
+                    ...(note ? [note, ''] : []),
+                    `Отчёт о реализации за ${label}: товаров с продажами ${items.length}` +
+                        (items.length > shown.length ? ` — показано ${shown.length}, увеличьте limit` : ''),
+                    '',
+                    ...lines,
+                    '',
+                    'Цена покупателя — сколько люди фактически заплатили, по отчёту о реализации Ozon. Разница с ценой',
+                    'продавца — скидки Ozon за его счёт: Ozon возвращает её продавцу баллами. Скидки персональные,',
+                    'поэтому у разных покупателей цена разная и одной «цены на сайте» нет.',
+                    ...(fresh ? [fresh] : [])
                 ].join('\n');
             })
         )

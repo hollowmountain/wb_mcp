@@ -359,6 +359,13 @@ export class OnecError extends Error {
                 return `1С запретила доступ к «${this.entity}» (403). У служебного пользователя нет прав на этот раздел.`;
             case 404:
                 return `1С не нашла «${this.entity}» (404). Объект не опубликован в настройках OData или называется иначе.`;
+            case 414:
+                // Своё значение статуса: IIS отвечает 404.15, а это не «не найдено».
+                return (
+                    `Запрос к «${this.entity}» слишком длинный: веб-сервер перед 1С не пропускает строку длиннее ` +
+                    'примерно двух тысяч знаков. Сократите фильтр — не больше 20 ссылок (guid) в одном запросе, ' +
+                    'остальные следующими запросами.'
+                );
             default:
                 return `1С вернула ошибку ${this.status} по «${this.entity}»: ${this.message}`;
         }
@@ -420,6 +427,14 @@ async function fetchEntity<T>(
 
     if (!res.ok) {
         const text = await res.text().catch(() => '');
+        // Перед 1С стоит IIS. Длинную строку запроса он режет сам и отвечает
+        // HTML-страницей «404.15 Not Found». Раньше это доходило до человека
+        // как «объект не опубликован» — 02.10.2026 Claude Ольги поверил и
+        // решил, что данных нет. На деле раздел есть, просто фильтр длинный.
+        if (text.trimStart().startsWith('<')) {
+            if (/404\.15/.test(text)) throw new OnecError('строка запроса слишком длинная', 414, entity);
+            throw new OnecError(`веб-сервер 1С ответил страницей ошибки ${res.status}`, res.status, entity);
+        }
         let detail = text;
         try {
             const parsed = JSON.parse(text) as { 'odata.error'?: { message?: { value?: string } } };

@@ -32,6 +32,10 @@ export class OzonPerfError extends Error {
     toUserMessage(): string {
         if (this.status === 429) return `Реклама Ozon ограничила частоту запросов (429) на ${this.path}. Повторите через минуту.`;
         if (this.status >= 500) return `Реклама Ozon сейчас не отвечает (${this.status}) на ${this.path} — сбой на их стороне. Попробуйте позже.`;
+        // Так Ozon отвечает на снятый метод — это поломка коннектора, а не отказ.
+        if (this.status === 404 && /page not found/i.test(this.message)) {
+            return `Ozon больше не поддерживает метод ${this.path} — нужна правка коннектора, сообщите администратору.`;
+        }
         if (this.status === 401) return 'Реклама Ozon не приняла ключ (401). Проверьте ключ Performance API.';
         return `Реклама Ozon отказала (${this.status}) на ${this.path}: ${this.message}`;
     }

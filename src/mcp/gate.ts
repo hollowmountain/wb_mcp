@@ -93,6 +93,7 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     // настоящая лежит в 1С и остаётся в money.
     nep_economy: 'orders',
     ozon_finance: 'money',
+    ozon_buyer_prices: 'orders',
     onec_stock_value: 'money',
     onec_money: 'money',
     nep_ads: 'ads',

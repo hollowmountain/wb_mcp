@@ -84,8 +84,11 @@ export function guarded<A>(name: string, handler: (args: A, extra: CallExtra) =>
             const result = await handler(args, extra);
             // Отказ по правам приходит обычным результатом с пометкой isError —
             // отличаем его от успеха, иначе в журнале не увидеть, кому чего
-            // не хватает для работы.
-            record(name, args, extra, result.isError === true ? 'denied' : 'ok', startedAt);
+            // не хватает для работы. А если упали все кабинеты сразу, это не
+            // отказ, а сбой источника — пишем его как error.
+            const outcome = result.sourceFailed === true ? 'error' : result.isError === true ? 'denied' : 'ok';
+            record(name, args, extra, outcome, startedAt);
+            delete result.sourceFailed;
             return result;
         } catch (e) {
             // Не тот кабинет — это отказ по доступу, а не поломка: в журнале

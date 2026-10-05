@@ -1009,13 +1009,29 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             const asked = args.top ?? 20;
             // На одну больше, чем покажем: иначе ровно заполненная страница
             // выглядит как «это всё», и человек считает итог по обрезку.
-            const fetched = await listEntity<Record<string, unknown>>(config.onec, entity, {
-                top: asked + 1,
-                skip: args.skip,
-                filter: args.filter,
-                select: args.select,
-                orderby: args.orderby
-            });
+            let fetched: Record<string, unknown>[];
+            try {
+                fetched = await listEntity<Record<string, unknown>>(config.onec, entity, {
+                    top: asked + 1,
+                    skip: args.skip,
+                    filter: args.filter,
+                    select: args.select,
+                    orderby: args.orderby
+                });
+            } catch (e) {
+                // «Сегмент пути X не найден» — поля X в разделе нет. 02.10.2026
+                // Claude Ольги угадывал поля по одному: Period, ВидЦен_Key, Ref.
+                // Отдаём список настоящих полей, чтобы второй заход был верным.
+                const missing = e instanceof Error ? /Сегмент пути (.+?) не найден/.exec(e.message)?.[1] : undefined;
+                if (!missing) throw e;
+                const sample = await listEntity<Record<string, unknown>>(config.onec, entity, { top: 1 }).catch(() => []);
+                const fields = Object.keys(sample[0] ?? {}).filter(k => !k.includes('@navigationLinkUrl'));
+                return fail(
+                    `В разделе «${entity}» нет поля «${missing}».` +
+                        (fields.length ? ` Поля раздела: ${fields.join(', ')}.` : '') +
+                        ' Ссылки на другие разделы называются с окончанием _Key, табличные части — отдельными разделами.'
+                );
+            }
             const more = fetched.length > asked;
             const rows = more ? fetched.slice(0, asked) : fetched;
             if (rows.length === 0) return text(`В «${entity}» по такому условию ничего нет.`);

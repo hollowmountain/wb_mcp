@@ -39,6 +39,10 @@ export class OzonApiError extends Error {
     toUserMessage(): string {
         if (this.status === 429) return `Ozon ограничил частоту запросов (429) на ${this.path}. Повторите через минуту.`;
         if (this.status >= 500) return `Ozon сейчас не отвечает (${this.status}) на ${this.path} — сбой на их стороне. Попробуйте позже.`;
+        // Так Ozon отвечает на снятый метод — это поломка коннектора, а не отказ.
+        if (this.status === 404 && /page not found/i.test(this.message)) {
+            return `Ozon больше не поддерживает метод ${this.path} — нужна правка коннектора, сообщите администратору.`;
+        }
         if (this.status === 401) return 'Ozon не принял ключ (401). Возможно, ключ API отозван в кабинете продавца.';
         return `Ozon отказал (${this.status}) на ${this.path}: ${this.message}`;
     }
@@ -142,7 +146,7 @@ export interface OzonPriceRow {
     price?: {
         price?: string;
         old_price?: string;
-        marketing_price?: string;
+        /** Цена с учётом акций продавца. Поля marketing_price — с акциями Ozon — в v5 больше нет. */
         marketing_seller_price?: string;
         min_price?: string;
         currency_code?: string;
@@ -367,43 +371,221 @@ export async function getOzonWarehouseStocks(cabinet: OzonCabinet): Promise<Ozon
  * проверено сверкой с оборотом кабинета. Расходы приходят отрицательными,
  * поэтому «к перечислению» — это просто сумма всех полей.
  */
-export interface OzonFinanceTotals {
-    accrualsForSale: number;
-    saleCommission: number;
-    processingAndDelivery: number;
-    refundsAndCancellations: number;
-    servicesAmount: number;
-    compensationAmount: number;
-    moneyTransfer: number;
-    othersAmount: number;
-    /** Сумма всех полей: сколько остаётся продавцу. */
-    net: number;
+// ─── Финансы: баланс за период ───────────────────────────────────────────────
+
+/**
+ * Итоги расчётов с Ozon за период.
+ *
+ * До октября 2026 брались из /v3/finance/transaction/totals. Ozon снял его без
+ * предупреждения: к 05.10.2026 и он, и /v3/finance/transaction/list отвечают
+ * «404 page not found» на всех трёх кабинетах, и ozon_finance молча не работал.
+ * Замена — /v1/finance/balance: продажи, возвраты, услуги, начислено и
+ * выплачено, плюс остаток на начало и конец. Период — не длиннее месяца,
+ * поэтому длинный разбивается на куски.
+ *
+ * Главное, чего у старого метода не было: продажи разложены на то, что
+ * заплатили покупатели (revenue), и то, что докрыл Ozon баллами за скидки
+ * (points_for_discounts). По oz-harbez за неделю 28.09–04.10 это 2,26 и
+ * 3,17 млн ₽: Ozon оплачивает больше половины цены продавца.
+ */
+export interface OzonFlow {
+    /** Всего по цене продавца. */
+    amount: number;
+    /** Вознаграждение Ozon. Отрицательное. */
+    fee: number;
+    /** Сколько заплатили покупатели. */
+    revenue: number;
+    /** Сколько докрыл Ozon баллами за скидки. */
+    points: number;
+    /** Партнёрские программы — софинансирование банка и подобное. */
+    partners: number;
 }
 
-export async function getOzonFinanceTotals(
-    cabinet: OzonCabinet,
-    params: { from: string; to: string }
-): Promise<OzonFinanceTotals> {
-    const raw = await retryOn429(() =>
-        post<{ result?: Record<string, number> }>(cabinet, '/v3/finance/transaction/totals', {
-            date: { from: `${params.from}T00:00:00.000Z`, to: `${params.to}T23:59:59.999Z` },
-            transaction_type: 'all'
-        })
-    );
-    const r = raw.result ?? {};
-    const num = (k: string): number => r[k] ?? 0;
-    const totals = {
-        accrualsForSale: num('accruals_for_sale'),
-        saleCommission: num('sale_commission'),
-        processingAndDelivery: num('processing_and_delivery'),
-        refundsAndCancellations: num('refunds_and_cancellations'),
-        servicesAmount: num('services_amount'),
-        compensationAmount: num('compensation_amount'),
-        moneyTransfer: num('money_transfer'),
-        othersAmount: num('others_amount')
+export interface OzonBalance {
+    from: string;
+    to: string;
+    openingBalance: number;
+    closingBalance: number;
+    accrued: number;
+    paid: number;
+    sales: OzonFlow;
+    returns: OzonFlow;
+    /** Услуги по видам, отрицательные — удержания. */
+    services: Array<{ name: string; amount: number }>;
+}
+
+/** Ozon отдаёт суммы то объектом {value}, то строкой: points_for_discounts приходит как "3166821.88". */
+const sumOf = (v: unknown): number => {
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') return Number(v) || 0;
+    if (v && typeof v === 'object') return Number((v as { value?: unknown }).value ?? 0) || 0;
+    return 0;
+};
+
+interface RawFlow {
+    amount?: unknown;
+    fee?: unknown;
+    amount_details?: { revenue?: unknown; points_for_discounts?: unknown; partner_programs?: unknown };
+}
+
+const flowOf = (f: RawFlow | undefined): OzonFlow => ({
+    amount: sumOf(f?.amount),
+    fee: sumOf(f?.fee),
+    revenue: sumOf(f?.amount_details?.revenue),
+    points: sumOf(f?.amount_details?.points_for_discounts),
+    partners: sumOf(f?.amount_details?.partner_programs)
+});
+
+const addFlow = (a: OzonFlow, b: OzonFlow): OzonFlow => ({
+    amount: a.amount + b.amount,
+    fee: a.fee + b.fee,
+    revenue: a.revenue + b.revenue,
+    points: a.points + b.points,
+    partners: a.partners + b.partners
+});
+
+/** Куски не длиннее 28 дней: Ozon отказывает с «maximum period is one month», а месяцы разной длины. */
+export function splitPeriod(from: string, to: string, maxDays = 28): Array<[string, string]> {
+    const day = 86_400_000;
+    const out: Array<[string, string]> = [];
+    let start = Date.parse(`${from}T00:00:00Z`);
+    const stop = Date.parse(`${to}T00:00:00Z`);
+    while (start <= stop) {
+        const end = Math.min(start + (maxDays - 1) * day, stop);
+        out.push([new Date(start).toISOString().slice(0, 10), new Date(end).toISOString().slice(0, 10)]);
+        start = end + day;
+    }
+    return out;
+}
+
+export async function getOzonBalance(cabinet: OzonCabinet, params: { from: string; to: string }): Promise<OzonBalance> {
+    const chunks = splitPeriod(params.from, params.to);
+    const zero: OzonFlow = { amount: 0, fee: 0, revenue: 0, points: 0, partners: 0 };
+    const acc: OzonBalance = {
+        from: params.from,
+        to: params.to,
+        openingBalance: 0,
+        closingBalance: 0,
+        accrued: 0,
+        paid: 0,
+        sales: zero,
+        returns: zero,
+        services: []
     };
-    const net = Object.values(totals).reduce((a, b) => a + b, 0);
-    return { ...totals, net };
+    const services = new Map<string, number>();
+    for (const [i, [from, to]] of chunks.entries()) {
+        const raw = await retryOn429(() =>
+            post<{
+                total?: { opening_balance?: unknown; closing_balance?: unknown; accrued?: unknown; payments?: unknown[] };
+                cashflows?: { sales?: RawFlow; returns?: RawFlow; services?: Array<{ name?: string; amount?: unknown }> };
+            }>(cabinet, '/v1/finance/balance', { date_from: from, date_to: to })
+        );
+        if (i === 0) acc.openingBalance = sumOf(raw.total?.opening_balance);
+        if (i === chunks.length - 1) acc.closingBalance = sumOf(raw.total?.closing_balance);
+        acc.accrued += sumOf(raw.total?.accrued);
+        acc.paid += (raw.total?.payments ?? []).reduce<number>((s, p) => s + sumOf(p), 0);
+        acc.sales = addFlow(acc.sales, flowOf(raw.cashflows?.sales));
+        acc.returns = addFlow(acc.returns, flowOf(raw.cashflows?.returns));
+        for (const sv of raw.cashflows?.services ?? []) {
+            const name = sv.name ?? 'other';
+            services.set(name, (services.get(name) ?? 0) + sumOf(sv.amount));
+        }
+    }
+    acc.services = [...services.entries()].map(([name, amount]) => ({ name, amount })).sort((a, b) => a.amount - b.amount);
+    return acc;
+}
+
+// ─── Цена покупателя: отчёт о реализации ─────────────────────────────────────
+
+/**
+ * Сколько покупатели фактически заплатили за каждый товар.
+ *
+ * В API цен этого больше нет: /v5/product/info/prices отдаёт цену продавца, а
+ * поле marketing_price — цену с учётом акций Ozon — убрали. Видимо, потому,
+ * что скидки Ozon теперь персональные («AI benefit system» в списке акций
+ * заказа): одной цены на сайте больше не существует. В заказе цена тоже
+ * продавцова, а скидку Ozon доплачивает продавцу отдельно баллами.
+ *
+ * Настоящая цена покупателя есть только в отчёте о реализации: по каждой
+ * проданной штуке seller_price_per_instance (цена продавца) раскладывается на
+ * price_per_instance (заплатил покупатель) + bonus (баллы за скидки от Ozon) +
+ * bank_coinvestment и pick_up_point_coinvestment. Сверено до копейки:
+ * 2100 = 1096,28 + 992,76 + 10,96.
+ *
+ * Отчёт помесячный и появляется после закрытия месяца. По дням Ozon отдаёт
+ * его только на подписке Premium Plus — у нас Premium.
+ */
+export interface OzonRealizationItem {
+    offerId: string;
+    name: string;
+    sku: number;
+    /** Продано штук. Возвраты не вычитаются: речь о цене покупки, а не об обороте. */
+    qty: number;
+    /** Сумма по цене продавца. */
+    sellerSum: number;
+    /** Сколько заплатили покупатели. */
+    buyerSum: number;
+}
+
+export interface OzonRealization {
+    year: number;
+    month: number;
+    items: OzonRealizationItem[];
+}
+
+interface RawRealizationRow {
+    item?: { name?: string; offer_id?: string; sku?: number };
+    seller_price_per_instance?: number;
+    delivery_commission?: { price_per_instance?: number; quantity?: number; amount?: number } | null;
+}
+
+/** Закрытый месяц не меняется — держим долго. Отчёт тяжёлый: по oz-harbez за сентябрь 6,7 МБ. */
+const REALIZATION_TTL_MS = 12 * 60 * 60 * 1000;
+const realizationCache = new Map<string, { at: number; data: OzonRealization | null }>();
+
+/** Отчёт за месяц или null, если Ozon его ещё не выпустил. */
+export async function getOzonRealization(cabinet: OzonCabinet, year: number, month: number): Promise<OzonRealization | null> {
+    const key = `${cabinet.slug}:${year}-${month}`;
+    const hit = realizationCache.get(key);
+    if (hit && Date.now() - hit.at < REALIZATION_TTL_MS) return hit.data;
+
+    let rows: RawRealizationRow[];
+    try {
+        const raw = await retryOn429(() =>
+            post<{ result?: { rows?: RawRealizationRow[] } }>(cabinet, '/v2/finance/realization', { month, year })
+        );
+        rows = raw.result?.rows ?? [];
+    } catch (e) {
+        // «Report was not found» — месяц ещё не закрыт. Не путать с «404 page
+        // not found»: так Ozon отвечает на снятый метод, это настоящая поломка.
+        if (e instanceof OzonApiError && e.status === 404 && /report/i.test(e.message)) {
+            realizationCache.set(key, { at: Date.now(), data: null });
+            return null;
+        }
+        throw e;
+    }
+
+    const by = new Map<string, OzonRealizationItem>();
+    for (const r of rows) {
+        const dc = r.delivery_commission;
+        const qty = dc?.quantity ?? 0;
+        if (!dc || qty <= 0 || !r.item?.offer_id) continue;
+        const cur = by.get(r.item.offer_id) ?? {
+            offerId: r.item.offer_id,
+            name: r.item.name ?? '',
+            sku: r.item.sku ?? 0,
+            qty: 0,
+            sellerSum: 0,
+            buyerSum: 0
+        };
+        cur.qty += qty;
+        cur.sellerSum += (r.seller_price_per_instance ?? 0) * qty;
+        cur.buyerSum += typeof dc.amount === 'number' ? dc.amount : (dc.price_per_instance ?? 0) * qty;
+        by.set(r.item.offer_id, cur);
+    }
+    const data: OzonRealization = { year, month, items: [...by.values()].sort((a, b) => b.qty - a.qty) };
+    realizationCache.set(key, { at: Date.now(), data });
+    return data;
 }
 
 

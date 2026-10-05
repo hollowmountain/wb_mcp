@@ -108,11 +108,13 @@ async function overCabinets(
     run: (cabinet: Cabinet) => Promise<string>
 ): Promise<ToolResult> {
     const cabinets = resolveCabinets(actor, slug);
+    let failed = 0;
     const blocks = await Promise.all(
         cabinets.map(async cabinet => {
             try {
                 return heading(cabinet, cabinets.length) + (await run(cabinet));
             } catch (e) {
+                failed++;
                 // Падение одного кабинета не должно скрывать данные остальных.
                 // Но и тонуть молча не должно: вызов целиком считается удачным,
                 // и без этой строки в логе сбой кабинета не видно вообще.
@@ -121,7 +123,9 @@ async function overCabinets(
             }
         })
     );
-    return text(blocks.join('\n\n'));
+    const result = text(blocks.join('\n\n'));
+    // Упали все кабинеты — это сбой вызова, а не удача с пустым ответом.
+    return failed === cabinets.length ? { ...result, isError: true, sourceFailed: true } : result;
 }
 
 export function registerReadTools(server: McpServer, actor: Actor): void {

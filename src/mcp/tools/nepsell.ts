@@ -6,12 +6,35 @@ import { inArea } from '../../auth/provider.js';
 import type { Actor } from '../../auth/provider.js';
 import { getAdMetrics, getFinances, listAdCampaigns, listNepsellClients } from '../../nepsell/client.js';
 import { linkCabinets, summariseAds, summariseFinances } from '../../nepsell/economy.js';
-import { actorOf, fail, guarded, text } from './common.js';
+import { actorOf, explainError, fail, guarded, text, type ToolResult } from './common.js';
 
 const money = (v: number): string => `${v.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽`;
 const pct = (v: number | null): string => (v === null ? '—' : `${v}%`);
 
 const dateArg = (what: string) => z.string().describe(`${what}, ISO-дата: 2026-08-01`);
+
+/**
+ * Nepsell принимает конец периода только раньше сегодняшнего дня: «end_date
+ * must be earlier than today». 30.09.2026 РОП попросила сентябрь по 30-е
+ * включительно — и получила отказ. Сдвигаем сами и говорим об этом.
+ */
+function clampPeriod(from: string, to: string): { from: string; to: string; note: string } | { error: string } {
+    const todayMsk = new Date(Date.now() + 3 * 3_600_000).toISOString().slice(0, 10);
+    const yesterday = new Date(Date.parse(`${todayMsk}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+    const f = from.slice(0, 10);
+    const asked = to.slice(0, 10);
+    const t = asked > yesterday ? yesterday : asked;
+    if (f > t) {
+        return { error: `Nepsell отдаёт данные только по вчерашний день (${yesterday}) включительно, а период начинается ${f}.` };
+    }
+    return { from: f, to: t, note: t !== asked ? `Nepsell отдаёт данные только по вчерашний день — период обрезан до ${t}.` : '' };
+}
+
+/** Упали все кабинеты — сбой вызова; часть — остальные всё равно показываем. */
+function finish(blocks: string[], failed: number, total: number, empty: string): ToolResult {
+    const result = text(blocks.join('\n\n') || empty);
+    return total > 0 && failed === total ? { ...result, isError: true, sourceFailed: true } : result;
+}
 
 /** На Wildberries товар зовут nmID, на Ozon — SKU. */
 const idLabel = (market: string): string => (market === 'wb' ? 'nmID' : 'SKU');
@@ -141,9 +164,13 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
             const denied = denyIfNotAllowed(actorNow);
             if (denied) return fail(denied);
 
+            const period = clampPeriod(args.dateFrom, args.dateTo);
+            if ('error' in period) return fail(period.error);
             const links = await resolveLinks(actorNow, args.cabinet);
             const top = args.topItems ?? 10;
-            const blocks: string[] = [];
+            const blocks: string[] = period.note ? [period.note] : [];
+            let tried = 0;
+            let failed = 0;
 
             for (const link of links) {
                 for (const market of ['wb', 'ozon'] as const) {
@@ -151,10 +178,18 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
                     const client = market === 'wb' ? link.wb : link.ozon;
                     if (!client) continue;
 
-                    const rows = (await getFinances(config.nepsell.token, client.client_id, args.dateFrom, args.dateTo)).data;
+                    const head = `━━ ${link.slug} · ${market === 'wb' ? 'Wildberries' : 'Ozon'} · ${period.from} — ${period.to} ━━`;
+                    tried++;
+                    let rows;
+                    try {
+                        rows = (await getFinances(config.nepsell.token, client.client_id, period.from, period.to)).data;
+                    } catch (e) {
+                        // Один кабинет упал — остальные всё равно нужны человеку.
+                        failed++;
+                        blocks.push(`${head}\nОшибка: ${explainError(e)}`);
+                        continue;
+                    }
                     const { totals: t, items, skipped } = summariseFinances(rows);
-
-                    const head = `━━ ${link.slug} · ${market === 'wb' ? 'Wildberries' : 'Ozon'} · ${args.dateFrom} — ${args.dateTo} ━━`;
                     const lines = [
                         head,
                         `Выручка: ${money(t.revenue)}   ·   продаж: ${t.salesCount}`,
@@ -189,7 +224,7 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
                 }
             }
 
-            return text(blocks.join('\n\n') || 'Данных за период нет.');
+            return finish(blocks, failed, tried, 'Данных за период нет.');
         })
     );
 
@@ -215,9 +250,13 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
             const denied = denyIfNoAds(actorNow);
             if (denied) return fail(denied);
 
+            const period = clampPeriod(args.dateFrom, args.dateTo);
+            if ('error' in period) return fail(period.error);
             const links = await resolveLinks(actorNow, args.cabinet);
             const top = args.topCampaigns ?? 10;
-            const blocks: string[] = [];
+            const blocks: string[] = period.note ? [period.note] : [];
+            let tried = 0;
+            let failed = 0;
 
             for (const link of links) {
                 for (const market of ['wb', 'ozon'] as const) {
@@ -225,19 +264,33 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
                     const client = market === 'wb' ? link.wb : link.ozon;
                     if (!client) continue;
 
-                    const [metrics, list] = await Promise.all([
-                        getAdMetrics(config.nepsell.token, client.client_id, args.dateFrom, args.dateTo),
-                        listAdCampaigns(config.nepsell.token, client.client_id, args.dateFrom, args.dateTo)
-                    ]);
+                    const head = `━━ ${link.slug} · ${market === 'wb' ? 'Wildberries' : 'Ozon'} · ${period.from} — ${period.to} ━━`;
+                    tried++;
+                    let metrics, list;
+                    try {
+                        [metrics, list] = await Promise.all([
+                            getAdMetrics(config.nepsell.token, client.client_id, period.from, period.to),
+                            listAdCampaigns(config.nepsell.token, client.client_id, period.from, period.to)
+                        ]);
+                    } catch (e) {
+                        failed++;
+                        blocks.push(`${head}\nОшибка: ${explainError(e)}`);
+                        continue;
+                    }
                     const { totals: t, campaigns } = summariseAds(metrics.data, list.data);
                     if (campaigns.length === 0) continue;
+                    // Ozon не делит заказы на прямые и по связанным товарам: у него
+                    // нули в обоих полях, и «прямых 0» читалось как «прямых заказов нет».
+                    const splits = market === 'wb';
 
                     const lines = [
-                        `━━ ${link.slug} · ${market === 'wb' ? 'Wildberries' : 'Ozon'} · ${args.dateFrom} — ${args.dateTo} ━━`,
+                        head,
                         `Расход на рекламу: ${money(t.spend)}   ·   продажи по рекламе: ${money(t.salesSum)}`,
                         `ДРР: ${pct(t.drrPercent)}   ·   CTR: ${pct(t.ctrPercent)}   ·   цена клика: ${t.clickPrice === null ? '—' : money(t.clickPrice)}`,
                         `Показы: ${t.views}   клики: ${t.clicks}   корзины: ${t.carts}`,
-                        `Заказы: ${t.orders} — из них прямых ${t.directOrders}, по связанным товарам ${t.assocOrders}`,
+                        splits
+                            ? `Заказы: ${t.orders} — из них прямых ${t.directOrders}, по связанным товарам ${t.assocOrders}`
+                            : `Заказы: ${t.orders} (Ozon не делит их на прямые и по связанным товарам)`,
                         ''
                     ];
 
@@ -246,8 +299,11 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
                         for (const [i, c] of campaigns.slice(0, top).entries()) {
                             lines.push(
                                 `  ${i + 1}. ${c.name}`,
-                                `     расход ${money(c.spend)}, продажи ${money(c.salesSum)}, ДРР ${pct(c.drrPercent)}, заказов ${c.orders} (связанных ${c.assocOrders})`,
-                                `     товаров в кампании: ${c.nmIds.length}, тянет за собой: ${c.assocNmIds.length}`
+                                `     расход ${money(c.spend)}, продажи ${money(c.salesSum)}, ДРР ${pct(c.drrPercent)}, заказов ${c.orders}` +
+                                    (splits ? ` (связанных ${c.assocOrders})` : ''),
+                                splits
+                                    ? `     товаров в кампании: ${c.nmIds.length}, тянет за собой: ${c.assocNmIds.length}`
+                                    : `     товаров в кампании: ${c.nmIds.length}`
                             );
                         }
                     }
@@ -255,7 +311,7 @@ export function registerNepsellTools(server: McpServer, actor: Actor): void {
                 }
             }
 
-            return text(blocks.join('\n\n') || 'Рекламных кампаний за период нет.');
+            return finish(blocks, failed, tried, 'Рекламных кампаний за период нет.');
         })
     );
 }
