@@ -602,7 +602,7 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                     const now = nowPrice.get(i.offerId)?.price;
                     return (
                         `${i.offerId} — покупатель платил в среднем ${rubN(i.buyerSum / i.qty)}` +
-                        (Math.round(i.minPrice) !== Math.round(i.maxPrice) ? `, от ${rubN(i.minPrice)} до ${rubN(i.maxPrice)}` : '') +
+                        (Math.round(i.lowPrice) !== Math.round(i.highPrice) ? `, у 80% покупателей от ${rubN(i.lowPrice)} до ${rubN(i.highPrice)}` : '') +
                         ` (продано ${i.qty} шт.)` +
                         ` | цена продавца в среднем ${rubN(i.sellerSum / i.qty)}, скидка за счёт Ozon ${share}%` +
                         (now ? ` | сейчас в кабинете ${rub(now)}` : '')
@@ -633,7 +633,8 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                     '',
                     'Цена покупателя — сколько люди фактически заплатили, по отчёту о реализации Ozon. Разница с ценой',
                     'продавца — скидки Ozon за его счёт: Ozon возвращает её продавцу баллами. Скидки персональные,',
-                    'поэтому у разных покупателей цена разная и одной «цены на сайте» нет.',
+                    'поэтому у разных покупателей цена разная и одной «цены на сайте» нет. «У 80% покупателей» —',
+                    'без 10% самых дешёвых и 10% самых дорогих покупок: там бывают оплаты почти целиком баллами.',
                     ...(fresh ? [fresh] : [])
                 ].join('\n');
             })

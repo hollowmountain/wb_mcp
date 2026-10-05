@@ -526,12 +526,13 @@ export interface OzonRealizationItem {
     /** Сколько заплатили покупатели. */
     buyerSum: number;
     /**
-     * Разброс цены покупателя за штуку. Скидки Ozon персональные, и средняя
-     * прячет, что один платит 249 ₽, а другой заметно больше, — для контроля
-     * цен это важнее средней.
+     * Сколько платят 80% покупателей: 10-й и 90-й процентиль цены за штуку.
+     * Скидки Ozon персональные, и одна средняя прячет разброс. А крайние
+     * значения бесполезны: у карбокситерапии минимум — 13 ₽, кто-то почти
+     * целиком заплатил баллами, и диапазон «13–1469 ₽» ничего не говорит.
      */
-    minPrice: number;
-    maxPrice: number;
+    lowPrice: number;
+    highPrice: number;
 }
 
 export interface OzonRealization {
@@ -573,6 +574,8 @@ export async function getOzonRealization(cabinet: OzonCabinet, year: number, mon
     }
 
     const by = new Map<string, OzonRealizationItem>();
+    // Цены всех проданных штук — только чтобы посчитать процентили, в кэш не идут.
+    const prices = new Map<string, number[]>();
     for (const r of rows) {
         const dc = r.delivery_commission;
         const qty = dc?.quantity ?? 0;
@@ -586,15 +589,22 @@ export async function getOzonRealization(cabinet: OzonCabinet, year: number, mon
             qty: 0,
             sellerSum: 0,
             buyerSum: 0,
-            minPrice: perInstance,
-            maxPrice: perInstance
+            lowPrice: 0,
+            highPrice: 0
         };
         cur.qty += qty;
         cur.sellerSum += (r.seller_price_per_instance ?? 0) * qty;
         cur.buyerSum += paid;
-        cur.minPrice = Math.min(cur.minPrice, perInstance);
-        cur.maxPrice = Math.max(cur.maxPrice, perInstance);
         by.set(r.item.offer_id, cur);
+        const list = prices.get(r.item.offer_id) ?? [];
+        for (let k = 0; k < qty; k++) list.push(perInstance);
+        prices.set(r.item.offer_id, list);
+    }
+    for (const [offer, list] of prices) {
+        const item = by.get(offer)!;
+        list.sort((a, b) => a - b);
+        item.lowPrice = list[Math.floor(0.1 * (list.length - 1))]!;
+        item.highPrice = list[Math.ceil(0.9 * (list.length - 1))]!;
     }
     const data: OzonRealization = { year, month, items: [...by.values()].sort((a, b) => b.qty - a.qty) };
     realizationCache.set(key, { at: Date.now(), data });
