@@ -525,6 +525,13 @@ export interface OzonRealizationItem {
     sellerSum: number;
     /** Сколько заплатили покупатели. */
     buyerSum: number;
+    /**
+     * Разброс цены покупателя за штуку. Скидки Ozon персональные, и средняя
+     * прячет, что один платит 249 ₽, а другой заметно больше, — для контроля
+     * цен это важнее средней.
+     */
+    minPrice: number;
+    maxPrice: number;
 }
 
 export interface OzonRealization {
@@ -570,17 +577,23 @@ export async function getOzonRealization(cabinet: OzonCabinet, year: number, mon
         const dc = r.delivery_commission;
         const qty = dc?.quantity ?? 0;
         if (!dc || qty <= 0 || !r.item?.offer_id) continue;
+        const paid = typeof dc.amount === 'number' ? dc.amount : (dc.price_per_instance ?? 0) * qty;
+        const perInstance = dc.price_per_instance ?? paid / qty;
         const cur = by.get(r.item.offer_id) ?? {
             offerId: r.item.offer_id,
             name: r.item.name ?? '',
             sku: r.item.sku ?? 0,
             qty: 0,
             sellerSum: 0,
-            buyerSum: 0
+            buyerSum: 0,
+            minPrice: perInstance,
+            maxPrice: perInstance
         };
         cur.qty += qty;
         cur.sellerSum += (r.seller_price_per_instance ?? 0) * qty;
-        cur.buyerSum += typeof dc.amount === 'number' ? dc.amount : (dc.price_per_instance ?? 0) * qty;
+        cur.buyerSum += paid;
+        cur.minPrice = Math.min(cur.minPrice, perInstance);
+        cur.maxPrice = Math.max(cur.maxPrice, perInstance);
         by.set(r.item.offer_id, cur);
     }
     const data: OzonRealization = { year, month, items: [...by.values()].sort((a, b) => b.qty - a.qty) };

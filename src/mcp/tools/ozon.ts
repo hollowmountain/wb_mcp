@@ -601,7 +601,9 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                     const share = i.sellerSum > 0 ? Math.round((1 - i.buyerSum / i.sellerSum) * 100) : 0;
                     const now = nowPrice.get(i.offerId)?.price;
                     return (
-                        `${i.offerId} — покупатель платил в среднем ${rubN(i.buyerSum / i.qty)} (продано ${i.qty} шт.)` +
+                        `${i.offerId} — покупатель платил в среднем ${rubN(i.buyerSum / i.qty)}` +
+                        (Math.round(i.minPrice) !== Math.round(i.maxPrice) ? `, от ${rubN(i.minPrice)} до ${rubN(i.maxPrice)}` : '') +
+                        ` (продано ${i.qty} шт.)` +
                         ` | цена продавца в среднем ${rubN(i.sellerSum / i.qty)}, скидка за счёт Ozon ${share}%` +
                         (now ? ` | сейчас в кабинете ${rub(now)}` : '')
                     );
