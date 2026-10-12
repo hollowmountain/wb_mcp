@@ -43,3 +43,6 @@ http://{$VPN_ACME_HOST} {
 		respond 404
 	}
 }
+
+# Другие сайты на этом же сервере — локальные файлы docker/sites/*.caddy, в репозиторий не попадают.
+import /etc/caddy/sites/*.caddy
