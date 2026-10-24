@@ -104,7 +104,11 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     media_upload_link: 'media',
     media_photos: 'media',
     media_plan: 'media',
-    media_generate: 'media'
+    media_generate: 'media',
+    buh_entities: 'buh',
+    buh_read: 'buh',
+    buh_balance: 'buh',
+    buh_bank: 'buh'
 };
 
 type Handler = (args: never, extra: never) => Promise<unknown>;

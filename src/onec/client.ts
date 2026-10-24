@@ -376,6 +376,11 @@ export interface OnecConfig {
     baseUrl: string;
     user: string;
     password: string;
+    /**
+     * Своя проверка «можно ли читать». Нужна бухгалтерским базам: белый список
+     * выше составлен под УНФ, а там другая конфигурация. Без неё — белый список УНФ.
+     */
+    allow?: (entity: string) => boolean;
 }
 
 /**
@@ -387,7 +392,7 @@ async function fetchEntity<T>(
     entity: string,
     query: Record<string, string | number | undefined>
 ): Promise<T> {
-    if (!isAllowed(entity)) {
+    if (!(cfg.allow ? cfg.allow(entity) : isAllowed(entity))) {
         // Не «нет данных», а именно отказ: так видно, что сработал запрет,
         // а не опечатка в имени. Полный список не печатаем — он длиной в две
         // сотни строк и в сообщении об ошибке бесполезен.
@@ -448,14 +453,34 @@ async function fetchEntity<T>(
     return (await res.json()) as T;
 }
 
+/**
+ * Имена всех опубликованных в базе разделов — по $metadata. Тоже только GET.
+ * Нужен бухгалтерским базам: что опубликовано, решает администратор базы,
+ * и коннектор читает ровно это, ничего не угадывая.
+ */
+export async function listEntitySets(cfg: OnecConfig): Promise<string[]> {
+    await bucket.take(1);
+    const auth = Buffer.from(`${cfg.user}:${cfg.password}`).toString('base64');
+    const res = await fetch(`${cfg.baseUrl}/odata/standard.odata/$metadata`, {
+        method: 'GET',
+        headers: { Authorization: `Basic ${auth}`, Accept: 'application/xml' },
+        signal: AbortSignal.timeout(120_000)
+    });
+    if (!res.ok) throw new OnecError(`список разделов не получен (${res.status})`, res.status, '$metadata');
+    const xml = await res.text();
+    return [...xml.matchAll(/<EntitySet\s+Name="([^"]+)"/g)].map(m => m[1]!);
+}
+
 /** Список записей сущности. */
 export async function listEntity<T>(
     cfg: OnecConfig,
     entity: OnecEntity,
-    opts: { top?: number; skip?: number; filter?: string; select?: string; orderby?: string; expand?: string } = {}
+    opts: { top?: number; skip?: number; filter?: string; select?: string; orderby?: string; expand?: string; max?: number } = {}
 ): Promise<T[]> {
     const res = await fetchEntity<{ value: T[] }>(cfg, entity, {
-        $top: Math.min(opts.top ?? 50, 1000),
+        // max поднимает потолок для виртуальных таблиц бухгалтерии: там сортировка
+        // для постраничной выборки стоит 49 с на страницу, а всё разом — 3 с.
+        $top: Math.min(opts.top ?? 50, opts.max ?? 1000),
         $skip: opts.skip,
         $filter: opts.filter,
         $select: opts.select,

@@ -49,6 +49,11 @@ const schema = z.object({
     ONEC_BASE_URL: z.string().default(''),
     ONEC_USER: z.string().default(''),
     ONEC_PASSWORD: z.string().default(''),
+    /** Базы 1С:Бухгалтерии: «ключ|название|адрес;ключ|название|адрес». Пусто — инструменты buh_* выключены. */
+    BUH_BASES: z.string().default(''),
+    /** Служебная учётка бухгалтерских баз. Пусто — та же, что у УНФ. */
+    BUH_USER: z.string().default(''),
+    BUH_PASSWORD: z.string().default(''),
     LOG_LEVEL: z.string().default('info')
 });
 
@@ -200,6 +205,18 @@ export const config = {
         baseUrl: env.ONEC_BASE_URL.replace(/\/+$/, ''),
         user: env.ONEC_USER,
         password: env.ONEC_PASSWORD
+    },
+    /**
+     * Бухгалтерские базы юрлиц. Адреса — только в .env: репозиторий публичный.
+     * Учётка одна на все базы, только чтение (запрет записи — в самом клиенте 1С, метод жёстко GET).
+     */
+    buh: {
+        bases: env.BUH_BASES.split(';')
+            .map(s => s.split('|').map(x => x.trim()))
+            .filter(p => p.length === 3 && p[0] && p[2])
+            .map(([key, label, url]) => ({ key: key!, label: label!, url: url!.replace(/\/+$/, '') })),
+        user: env.BUH_USER || env.ONEC_USER,
+        password: env.BUH_PASSWORD || env.ONEC_PASSWORD
     },
 
     identityProvider: env.IDENTITY_PROVIDER,

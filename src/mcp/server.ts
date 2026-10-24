@@ -5,6 +5,7 @@ import { gateByAreas } from './gate.js';
 import { registerMediaTools } from './tools/media.js';
 import { registerNepsellTools } from './tools/nepsell.js';
 import { registerOnecTools } from './tools/onec.js';
+import { registerBuhTools } from './tools/buh.js';
 import { registerOzonTools } from './tools/ozon.js';
 import { registerReadTools } from './tools/read.js';
 import { registerWhoAmI, registerWriteTools } from './tools/write.js';
@@ -200,6 +201,7 @@ export function createMcpServer(actor: Actor): McpServer {
     registerWriteTools(server, actor);
     registerNepsellTools(server, actor);
     registerOnecTools(server, actor);
+    registerBuhTools(server, actor);
     registerOzonTools(server, actor);
     registerMediaTools(server, actor);
 
