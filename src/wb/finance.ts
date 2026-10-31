@@ -248,6 +248,9 @@ export async function loadFinance<T>(
                         logger.warn({ cabinet: cabinet.slug, kind, from, to, err: (e as Error).message }, 'wb_fin_cache: не удалось сохранить');
                     }
                 }
+                // Заодно выметаем протухшее: периоды бывают любые, и без этого
+                // память копила бы каждый когда-то спрошенный.
+                for (const [k, v] of memoryCache) if (Date.now() - v.fetchedAt >= OPEN_TTL_MS) memoryCache.delete(k);
                 memoryCache.set(key, snap);
                 return snap as FinanceSnapshot<unknown>;
             })
@@ -716,7 +719,12 @@ export function addGroupRaw(acc: Map<string, number>, g: RealizationGroup, field
 const STORAGE_WINDOW_DAYS = 8;
 /** Сколько ждать, пока WB подготовит одно окно. */
 const STORAGE_TASK_MAX_MS = 10 * 60_000;
-const STORAGE_DOWNLOAD_ATTEMPTS = 3;
+/**
+ * Скачивание окна рвётся: 31.10.2026 из Бишкека окно в 2–3 МБ шло по 4–6 минут
+ * и обрывалось через 20–190 секунд в половине попыток. Продолжить с места WB
+ * не даёт, поэтому окно качается заново; лимит на скачивание — раз в минуту.
+ */
+const STORAGE_DOWNLOAD_ATTEMPTS = 5;
 
 /** Хранение за день по товару: [дата, nmId, артикул, сумма ₽, строк]. */
 export type StorageEntry = [string, number, string, number, number];

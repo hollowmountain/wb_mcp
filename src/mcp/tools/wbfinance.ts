@@ -280,11 +280,15 @@ function realizationText(
     let rows: string[][];
 
     if (args.groupBy === 'deduction') {
-        // Удержания по основанию: у строк «Удержание» основание лежит в bonusTypeName.
+        // Удержания по основанию. У строк «Удержание» основание лежит в
+        // bonusTypeName, и WB дописывает к нему номер документа: «Оказание услуг
+        // «WB Продвижение», документ №310250807». В таблице — текст как есть, а
+        // итог за период — по виду основания, без номера, иначе каждая неделя
+        // рекламы стала бы отдельным видом.
         const byReason = new Map<string, { report: number; reason: string; amount: number; rows: number }>();
         const reasonTotals = new Map<string, number>();
+        const i = fields.indexOf('deduction');
         for (const g of groups) {
-            const i = fields.indexOf('deduction');
             const amount = i < 0 ? 0 : (g.sums[i] ?? 0);
             if (amount === 0) continue;
             const reason = g.bonus || g.oper || '(основание не указано)';
@@ -293,16 +297,17 @@ function realizationText(
             cur.amount += amount;
             cur.rows += g.rows;
             byReason.set(key, cur);
-            reasonTotals.set(reason, (reasonTotals.get(reason) ?? 0) + amount);
+            const kind = reason.replace(/,?\s*документ\s*№\s*\S+/giu, '').trim();
+            reasonTotals.set(kind, (reasonTotals.get(kind) ?? 0) + amount);
         }
         head.push(
-            'Удержания по основаниям за период: ' +
+            'Удержания по видам основания за период (без номеров документов): ' +
                 ([...reasonTotals.entries()]
                     .sort((a, b) => b[1] - a[1])
                     .map(([reason, v]) => `${reason} ${money(v)}`)
                     .join(' | ') || 'нет')
         );
-        columns = ['report_id', 'date_from', 'date_to', 'основание', 'deduction', 'строк'];
+        columns = ['realizationreport_id', 'date_from', 'date_to', 'основание', 'deduction', 'строк'];
         rows = [...byReason.values()]
             .sort((a, b) => {
                 const ra = reportById.get(a.report)?.dateFrom ?? '';
@@ -352,7 +357,7 @@ function realizationText(
                     const rb = reportById.get(b.sample.report);
                     return (ra?.dateFrom ?? '').localeCompare(rb?.dateFrom ?? '') || a.sample.report - b.sample.report;
                 });
-                columns = ['report_id', 'date_from', 'date_to', 'create_dt', 'тип', 'строк', ...shownMetrics];
+                columns = ['realizationreport_id', 'date_from', 'date_to', 'create_dt', 'тип', 'строк', ...shownMetrics];
                 rows = list.map(x => {
                     const r = reportById.get(x.sample.report);
                     return [
@@ -377,7 +382,7 @@ function realizationText(
                     const rb = reportById.get(b.sample.report)?.dateFrom ?? '';
                     return ra.localeCompare(rb) || a.sample.report - b.sample.report || b.metrics.revenue - a.metrics.revenue;
                 });
-                columns = ['report_id', 'date_from', 'nmId', 'артикул', ...shownMetrics];
+                columns = ['realizationreport_id', 'date_from', 'nmId', 'артикул', ...shownMetrics];
                 rows = list.map(x => [
                     String(x.sample.report),
                     reportById.get(x.sample.report)?.dateFrom ?? '',
@@ -551,9 +556,9 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
             description:
                 'Детализация еженедельных отчётов Wildberries о реализации за период — то, из чего собираются строки ВБ в P&L. ' +
                 'Сервер сам выкачивает все строки (за месяц до 100 тыс.) и отдаёт суммы в разрезе groupBy: ' +
-                'report — по отчётам (report_id, date_from, date_to, create_dt); sku — по товарам (nmId + артикул); report_sku; ' +
+                'report — по отчётам (realizationreport_id, date_from, date_to, create_dt); sku — по товарам (nmId + артикул); report_sku; ' +
                 'operation — по типу документа и обоснованию оплаты; deduction — удержания по основанию и отчёту ' +
-                '(ВБ.Продвижение, Джем, утилизация, отзывы…). ' +
+                '(WB Продвижение, Джем, утилизация, отзывы…; итог — по виду основания без номера документа). ' +
                 'Метрики (mode=metrics) — формулы финансиста, s = −1 для «Возврат», иначе 1: revenue = s × retail_price_withdisc_rub; ' +
                 'price_after_spp = s × retail_amount; for_pay = s × ppvz_for_pay (к перечислению за товар); ' +
                 'commission = −s × (retail_price_withdisc_rub − ppvz_for_pay) + acquiring_fee; acquiring = −acquiring_fee; ' +
