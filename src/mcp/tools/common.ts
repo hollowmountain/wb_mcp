@@ -35,6 +35,53 @@ function hasUserMessage(e: unknown): e is Error & { toUserMessage(): string } {
 
 export const text = (value: string): ToolResult => ({ content: [{ type: 'text', text: value }] });
 
+/**
+ * Предел одного ответа выгрузок «за месяц». Всё, что отдаёт инструмент,
+ * ложится в контекст Claude целиком, поэтому длинные таблицы режем на
+ * страницы. 30 КБ — договорённость из ТЗ на отчёт «3 Формы» (30.10.2026).
+ * Считаем в байтах UTF-8: кириллица весит вдвое, и по знакам предел
+ * перевалил бы за 50 КБ.
+ */
+export const REPLY_BYTES = 30_000;
+
+/** Сумма для таблицы: «1 234,50», с копейками, без знака рубля. */
+export const amount = (v: number): string =>
+    v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+/**
+ * Страница таблицы: с offset, не больше limit строк и не больше REPLY_BYTES
+ * вместе с шапкой. Хотя бы одна строка берётся всегда, иначе листание
+ * встало бы на длинной строке.
+ *
+ * Обрезка здесь никогда не бывает молчаливой: внизу пишется, какие строки
+ * показаны из скольких и с какого offset продолжать. Итоги вызывающий
+ * считает сам по всем строкам, а не по странице.
+ */
+export function pageOf(rows: string[], offset: number, limit: number, head: string): { lines: string[]; footer: string } {
+    // Запас под строку «Строки … из …» и перевод строк.
+    const budget = REPLY_BYTES - Buffer.byteLength(head, 'utf8') - 200;
+    const lines: string[] = [];
+    let used = 0;
+    let bySize = false;
+    for (let i = offset; i < rows.length && lines.length < limit; i++) {
+        const b = Buffer.byteLength(rows[i]!, 'utf8') + 1;
+        if (lines.length > 0 && used + b > budget) {
+            bySize = true;
+            break;
+        }
+        lines.push(rows[i]!);
+        used += b;
+    }
+    const end = offset + lines.length;
+    if (rows.length === 0) return { lines, footer: '' };
+    if (lines.length === 0) return { lines, footer: `Строк всего ${rows.length}, offset=${offset} — дальше пусто. Начните с offset=0.` };
+    const footer =
+        end < rows.length
+            ? `Строки ${offset + 1}–${end} из ${rows.length}${bySize ? ' (страница урезана до 30 КБ)' : ''}. Дальше: offset=${end}`
+            : `Строки ${offset + 1}–${end} из ${rows.length}${offset > 0 ? ' — последняя страница' : ''}.`;
+    return { lines, footer };
+}
+
 export const fail = (value: string): ToolResult => ({ content: [{ type: 'text', text: value }], isError: true });
 
 export function actorOf(extra: CallExtra): Actor {

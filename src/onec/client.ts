@@ -531,7 +531,9 @@ const PAGE = 1000;
 export async function resolveNames(
     cfg: OnecConfig,
     entity: OnecEntity,
-    keys: Iterable<string>
+    keys: Iterable<string>,
+    /** Какое поле брать вместо названия: «ИНН» у контрагента, «Code» у счёта. */
+    field = 'Description'
 ): Promise<Map<string, string>> {
     const unique = [...new Set([...keys].filter(k => k && k !== EMPTY_GUID))];
     const names = new Map<string, string>();
@@ -539,7 +541,8 @@ export async function resolveNames(
 
     // Справочники меняются редко, а один и тот же товар встречается в остатках
     // на десятке складов. Без памяти каждый вызов заново гонял бы сотни ссылок.
-    const cached = nameCache.get(entity);
+    const cacheKey = field === 'Description' ? entity : `${entity}|${field}`;
+    const cached = nameCache.get(cacheKey);
     const fresh = cached && Date.now() - cached.at < NAME_TTL ? cached.names : new Map<string, string>();
     const missing: string[] = [];
     for (const k of unique) {
@@ -555,10 +558,10 @@ export async function resolveNames(
     // страницами меньше чем за секунду.
     if (missing.length > WHOLESALE_FROM) {
         for (let skip = 0; skip < 50_000; skip += PAGE) {
-            const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity, {
+            const rows = await listEntity<Record<string, unknown> & { Ref_Key: string }>(cfg, entity, {
                 top: PAGE,
                 skip,
-                select: 'Ref_Key,Description',
+                select: `Ref_Key,${field}`,
                 // Сортировка обязательна. Без неё 1С не гарантирует порядок строк
                 // между запросами, и страницы перекрываются: шесть страниц по
                 // тысяче дали 1915 разных записей из 5216, остальное — повторы.
@@ -566,7 +569,7 @@ export async function resolveNames(
                 // схлопывались в одну безымянную кучу.
                 orderby: 'Ref_Key'
             });
-            for (const r of rows) fresh.set(r.Ref_Key, r.Description ?? '');
+            for (const r of rows) fresh.set(r.Ref_Key, String(r[field] ?? '').trim());
             if (rows.length < PAGE) break;
         }
         for (const k of missing) names.set(k, fresh.get(k) ?? '');
@@ -574,19 +577,19 @@ export async function resolveNames(
         for (let i = 0; i < missing.length; i += REFS_PER_QUERY) {
             const chunk = missing.slice(i, i + REFS_PER_QUERY);
             const filter = chunk.map(k => `Ref_Key eq guid'${k}'`).join(' or ');
-            const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity, {
+            const rows = await listEntity<Record<string, unknown> & { Ref_Key: string }>(cfg, entity, {
                 top: chunk.length,
                 filter,
-                select: 'Ref_Key,Description'
+                select: `Ref_Key,${field}`
             });
             for (const r of rows) {
-                const name = r.Description ?? '';
+                const name = String(r[field] ?? '').trim();
                 names.set(r.Ref_Key, name);
                 fresh.set(r.Ref_Key, name);
             }
         }
     }
-    nameCache.set(entity, { at: cached && Date.now() - cached.at < NAME_TTL ? cached.at : Date.now(), names: fresh });
+    nameCache.set(cacheKey, { at: cached && Date.now() - cached.at < NAME_TTL ? cached.at : Date.now(), names: fresh });
     return names;
 }
 
@@ -650,10 +653,21 @@ export interface OnecStockValueRow {
     place: string;
     /** Свой склад или контрагент: суммы по ним смешивать нельзя. */
     atPartner: boolean;
+    /** Код счёта учёта из управленческого плана счетов: «10», «20.01». */
+    account: string;
+    /**
+     * Строка на счёте затрат (20, 25): это незавершённое производство, а не
+     * запас. Количества у таких строк нет, только сумма — в стоимость одной
+     * штуки их добавлять нельзя.
+     */
+    inProduction: boolean;
     quantity: number;
     sum: number;
     sumNoVat: number;
 }
+
+/** День после указанного, ГГГГ-ММ-ДД. */
+const nextDay = (d: string): string => new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
 
 /**
  * Денежная оценка запасов из регистра «Запасы».
@@ -668,15 +682,28 @@ export interface OnecStockValueRow {
  * у контрагентов сумма без НДС оказывается БОЛЬШЕ суммы с НДС, чего быть
  * не может. Поэтому части не складываются в одно число, а показываются
  * порознь: пусть расхождение видит человек, а не прячется в итоге.
+ *
+ * С датой — остаток на конец этого дня. Виртуальной таблице 1С передаётся
+ * начало следующего дня: остаток «на момент» не включает движения в сам
+ * момент, а закрытие месяца и многие документы в этой базе датированы
+ * 23:59:59 — с границей «день 23:59:59» они бы выпали.
  */
-export async function getOnecStockValue(cfg: OnecConfig): Promise<OnecStockValueRow[]> {
+export async function getOnecStockValue(cfg: OnecConfig, date?: string): Promise<OnecStockValueRow[]> {
     const PAGE_SIZE = 1000;
+    const entity = date
+        ? `AccumulationRegister_Запасы/Balance(Period=datetime'${nextDay(date)}T00:00:00')`
+        : 'AccumulationRegister_Запасы/Balance';
     const raw: Array<Record<string, unknown>> = [];
     for (let skip = 0; skip < 40_000; skip += PAGE_SIZE) {
-        const rows = await listEntity<Record<string, unknown>>(cfg, 'AccumulationRegister_Запасы/Balance', {
+        const rows = await listEntity<Record<string, unknown>>(cfg, entity, {
             top: PAGE_SIZE,
             skip,
-            orderby: 'Номенклатура_Key'
+            orderby: 'Номенклатура_Key',
+            // Только нужные поля: строка регистра целиком втрое тяжелее,
+            // а строк за две с половиной тысячи.
+            select:
+                'Номенклатура_Key,СтруктурнаяЕдиница,СтруктурнаяЕдиница_Type,СчетУчета_Key,' +
+                'КоличествоBalance,СуммаBalance,СуммаБезНДСBalance'
         });
         raw.push(...rows);
         if (rows.length < PAGE_SIZE) break;
@@ -685,7 +712,7 @@ export async function getOnecStockValue(cfg: OnecConfig): Promise<OnecStockValue
     const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
     const partnerOf = (v: unknown): boolean => String(v ?? '').endsWith('Catalog_Контрагенты');
 
-    const [products, places, partners] = await Promise.all([
+    const [products, places, partners, accounts] = await Promise.all([
         resolveNames(cfg, 'Catalog_Номенклатура', raw.map(r => String(r.Номенклатура_Key ?? ''))),
         resolveNames(
             cfg,
@@ -696,23 +723,69 @@ export async function getOnecStockValue(cfg: OnecConfig): Promise<OnecStockValue
             cfg,
             'Catalog_Контрагенты',
             raw.filter(r => partnerOf(r.СтруктурнаяЕдиница_Type)).map(r => String(r.СтруктурнаяЕдиница ?? ''))
-        )
+        ),
+        resolveNames(cfg, 'ChartOfAccounts_Управленческий', raw.map(r => String(r.СчетУчета_Key ?? '')), 'Code')
     ]);
 
     return raw.map(r => {
         const atPartner = partnerOf(r.СтруктурнаяЕдиница_Type);
         const placeKey = String(r.СтруктурнаяЕдиница ?? '');
+        const account = accounts.get(String(r.СчетУчета_Key ?? '')) ?? '';
         return {
             productKey: String(r.Номенклатура_Key ?? ''),
             product: products.get(String(r.Номенклатура_Key ?? '')) || '(без названия)',
             placeKey,
             place: (atPartner ? partners : places).get(placeKey) || '(не указано)',
             atPartner,
+            account,
+            // В управленческом плане счетов УНФ 20 — прямые затраты
+            // производства, 25 — косвенные. Остальное (10, 41, 08) — запасы.
+            inProduction: /^2[05](\.|$)/.test(account),
             quantity: num(r.КоличествоBalance),
             sum: num(r.СуммаBalance),
             sumNoVat: num(r.СуммаБезНДСBalance)
         };
     });
+}
+
+
+/**
+ * Готовая продукция: какая номенклатура к ней относится.
+ *
+ * По счёту учёта ГП не отличить: в этой УНФ и сырьё, и готовые товары лежат
+ * на счёте 10 «Сырьё и материалы», 41-го и 43-го в остатках нет вовсе
+ * (проверено 31.10.2026 на остатке на 31.08). Тип номенклатуры у всех
+ * «Запас», а способ пополнения «Производство» стоит и у полуфабрикатов
+ * (ПБН — расфасовано без этикетки, ВСБ — нефасованная основа). Различает
+ * только категория номенклатуры: её ведут кодами — ГП, РКВ (сырьё),
+ * Т (тара), ЭТК (этикетки), РМ, ИК, КП, ПБН, ВСБ. «ГП» — готовая продукция,
+ * и группа справочника «ГП готовая продукция» с ней совпадает.
+ */
+let finishedCache: { at: number; category: string; keys: Set<string> } | null = null;
+
+export async function getFinishedProductKeys(cfg: OnecConfig): Promise<{ category: string; keys: Set<string> } | null> {
+    if (finishedCache && Date.now() - finishedCache.at < NAME_TTL) return finishedCache;
+    const cats = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, 'Catalog_КатегорииНоменклатуры', {
+        top: 500,
+        select: 'Ref_Key,Description'
+    });
+    const gp = cats.filter(c => /^ГП$/i.test((c.Description ?? '').trim()));
+    if (gp.length === 0) return null;
+    const keys = new Set<string>();
+    const filter = gp.map(c => `КатегорияНоменклатуры_Key eq guid'${c.Ref_Key}'`).join(' or ');
+    for (let skip = 0; skip < 50_000; skip += PAGE) {
+        const rows = await listEntity<{ Ref_Key: string }>(cfg, 'Catalog_Номенклатура', {
+            top: PAGE,
+            skip,
+            filter,
+            select: 'Ref_Key',
+            orderby: 'Ref_Key'
+        });
+        for (const r of rows) keys.add(r.Ref_Key);
+        if (rows.length < PAGE) break;
+    }
+    finishedCache = { at: Date.now(), category: gp.map(c => (c.Description ?? '').trim()).join(', '), keys };
+    return finishedCache;
 }
 
 
@@ -723,41 +796,85 @@ export type CashKind = 'касса' | 'счёт';
 
 export interface CashFlowRow {
     kind: CashKind;
-    /** Приход или расход. */
+    /** Приход или расход. У перемещения — false, смотреть transfer. */
     incoming: boolean;
+    /**
+     * Перемещение между своими кассами и счетами (сейф → цех и т. п.).
+     * Это не приход и не расход компании: в итоги «пришло/ушло» не входит.
+     */
+    transfer: boolean;
+    /** Куда пришло перемещение: в кассу или на счёт. У платежей не заполнено. */
+    toKind?: CashKind;
     number: string;
     date: string;
     sum: number;
     /** Вид операции из 1С: «ОтПокупателя», «Поставщику» и подобное. */
     operation: string;
     partner: string;
+    partnerInn: string;
+    /** Касса, карта или расчётный счёт; у перемещения — «откуда → куда». */
+    place: string;
+    /**
+     * Подотчётник из документа. При выдаче зарплаты в этом же поле стоит
+     * получатель зарплаты — показывать его можно только с областью payroll.
+     */
+    personKey: string;
+    person: string;
     /** Статья движения денежных средств — за что платили. */
     article: string;
     purpose: string;
 }
 
+// Поля берём явно: документ целиком тянет расшифровку платежа и ещё пять
+// табличных частей, и страница в 500 расходов со счёта весила мегабайты.
+// Список полей не длиннее нужного: кириллица в адресе кодируется вшестеро,
+// а IIS режет строку запроса на двух тысячах знаков.
+const CASH_FIELDS = 'Ref_Key,Number,Date,ВидОперации,СуммаДокумента,Контрагент_Key,Статья_Key,ПоложениеСтатьи,Подотчетник_Key,Комментарий';
+
 const CASH_SOURCES = [
-    { entity: 'Document_ПоступлениеВКассу', kind: 'касса', incoming: true },
-    { entity: 'Document_РасходИзКассы', kind: 'касса', incoming: false },
-    { entity: 'Document_ПоступлениеНаСчет', kind: 'счёт', incoming: true },
-    { entity: 'Document_РасходСоСчета', kind: 'счёт', incoming: false }
+    { entity: 'Document_ПоступлениеВКассу', kind: 'касса', incoming: true, select: `${CASH_FIELDS},Касса_Key,Основание` },
+    { entity: 'Document_РасходИзКассы', kind: 'касса', incoming: false, select: `${CASH_FIELDS},Касса_Key,Основание` },
+    { entity: 'Document_ПоступлениеНаСчет', kind: 'счёт', incoming: true, select: `${CASH_FIELDS},БанковскийСчет_Key,НазначениеПлатежа` },
+    { entity: 'Document_РасходСоСчета', kind: 'счёт', incoming: false, select: `${CASH_FIELDS},БанковскийСчет_Key,НазначениеПлатежа` }
 ] as const;
+
+const TRANSFER_FIELDS =
+    'Ref_Key,Number,Date,СуммаДокумента,Статья_Key,Комментарий,ТипДенежныхСредств,Касса_Key,БанковскийСчет_Key,' +
+    'ТипДенежныхСредствПолучатель,КассаПолучатель_Key,БанковскийСчетПолучатель_Key';
+
+/**
+ * Выгрузка за период живёт десять минут. Ради листания: страницы одного
+ * месяца должны браться из одного снимка, иначе новый документ в 1С сдвинет
+ * offset и строка пропадёт или повторится. И 1С не гоняем заново на каждую
+ * страницу — за месяц это под восемьсот документов.
+ */
+const CASH_TTL = 10 * 60_000;
+const cashCache = new Map<string, { at: number; value: { rows: CashFlowRow[]; capped: string[] } }>();
 
 /**
  * Платежи за период по кассе и расчётному счёту.
  *
  * Единого журнала платежей в базе нет: приход и расход, касса и счёт — четыре
  * разных документа, поэтому собираем их сами и складываем в одну ленту.
+ * Пятым — перемещения между своими кассами и счетами: в итоги прихода и
+ * расхода они не входят, но без них не сходится движение по каждой кассе.
  *
  * Берём только проведённые и неудалённые: в выгрузке хватает и черновиков, и
  * помеченного на удаление, а по суммам их не отличить от настоящих платежей.
+ *
+ * capped — документы, на которых упёрлись в maxPerSource: тогда выгрузка
+ * неполная, и инструмент обязан об этом сказать.
  */
 export async function getOnecCashFlow(
     cfg: OnecConfig,
     dateFrom: string,
     dateTo: string,
     maxPerSource = 5000
-): Promise<CashFlowRow[]> {
+): Promise<{ rows: CashFlowRow[]; capped: string[] }> {
+    const cacheKey = `${cfg.baseUrl}|${dateFrom}|${dateTo}|${maxPerSource}`;
+    const hit = cashCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < CASH_TTL) return hit.value;
+
     // 1С понимает только datetime-литералы, дата без времени отвергается.
     const filter =
         `Posted eq true and DeletionMark eq false` +
@@ -765,50 +882,142 @@ export async function getOnecCashFlow(
         ` and Date le datetime'${dateTo}T23:59:59'`;
 
     const PAGE_SIZE = 500;
+    const capped: string[] = [];
 
-    const parts = await Promise.all(
-        CASH_SOURCES.map(async src => {
-            // Забираем период целиком, а не первую страницу: расходов со счёта
-            // за месяц набегает под шесть сотен, и обрезанная выборка выглядела
-            // бы как полная — итог занижался молча.
-            //
-            // Сортировка по Ref_Key обязательна: 1С не гарантирует порядок строк
-            // между запросами, и без неё страницы перекрываются.
-            const rows: Record<string, unknown>[] = [];
-            for (let skip = 0; skip < maxPerSource; skip += PAGE_SIZE) {
-                const page = await listEntity<Record<string, unknown>>(cfg, src.entity, {
-                    top: PAGE_SIZE,
-                    skip,
-                    filter,
-                    orderby: 'Ref_Key'
-                });
-                rows.push(...page);
-                if (page.length < PAGE_SIZE) break;
+    // Забираем период целиком, а не первую страницу: расходов со счёта
+    // за месяц набегает под шесть сотен, и обрезанная выборка выглядела
+    // бы как полная — итог занижался молча.
+    //
+    // Сортировка по Ref_Key обязательна: 1С не гарантирует порядок строк
+    // между запросами, и без неё страницы перекрываются.
+    const fetchAll = async (entity: string, select: string): Promise<Record<string, unknown>[]> => {
+        const rows: Record<string, unknown>[] = [];
+        for (let skip = 0; ; skip += PAGE_SIZE) {
+            if (skip >= maxPerSource) {
+                capped.push(entity);
+                break;
             }
-            return rows.map(r => ({ src, r }));
-        })
-    );
-    const all = parts.flat();
-    if (all.length === 0) return [];
+            const page = await listEntity<Record<string, unknown>>(cfg, entity, {
+                top: PAGE_SIZE,
+                skip,
+                filter,
+                orderby: 'Ref_Key',
+                select
+            });
+            rows.push(...page);
+            if (page.length < PAGE_SIZE) break;
+        }
+        return rows;
+    };
 
-    const [partners, articles] = await Promise.all([
-        resolveNames(cfg, 'Catalog_Контрагенты', all.map(x => String(x.r.Контрагент_Key ?? ''))),
-        resolveNames(cfg, 'Catalog_СтатьиДвиженияДенежныхСредств', all.map(x => String(x.r.Статья_Key ?? '')))
+    const [parts, moves] = await Promise.all([
+        Promise.all(CASH_SOURCES.map(async src => (await fetchAll(src.entity, src.select)).map(r => ({ src, r })))),
+        fetchAll('Document_ПеремещениеДС', TRANSFER_FIELDS)
+    ]);
+    const all = parts.flat();
+
+    // Статья может стоять не в шапке, а в строках расшифровки — тогда в шапке
+    // пусто, и платёж выглядел бы «без статьи». За август 2026 таких нет ни
+    // одного, поэтому расшифровку дочитываем только для них, по 20 ссылок.
+    const lineArticles = new Map<string, Array<{ key: string; sum: number }>>();
+    for (const src of CASH_SOURCES) {
+        const refs = all.filter(x => x.src === src && String(x.r.ПоложениеСтатьи ?? 'ВШапке') !== 'ВШапке').map(x => String(x.r.Ref_Key));
+        for (let i = 0; i < refs.length; i += REFS_PER_QUERY) {
+            const chunk = refs.slice(i, i + REFS_PER_QUERY);
+            const docs = await listEntity<{ Ref_Key: string; РасшифровкаПлатежа?: Array<{ СтатьяДДС_Key?: string; СуммаПлатежа?: number }> }>(
+                cfg,
+                src.entity,
+                {
+                    top: chunk.length,
+                    filter: chunk.map(k => `Ref_Key eq guid'${k}'`).join(' or '),
+                    select: 'Ref_Key,РасшифровкаПлатежа/СтатьяДДС_Key,РасшифровкаПлатежа/СуммаПлатежа'
+                }
+            );
+            for (const d of docs) {
+                lineArticles.set(
+                    d.Ref_Key,
+                    (d.РасшифровкаПлатежа ?? []).map(l => ({ key: String(l.СтатьяДДС_Key ?? ''), sum: l.СуммаПлатежа ?? 0 }))
+                );
+            }
+        }
+    }
+
+    const str = (v: unknown): string => String(v ?? '');
+    const desks = [...all.map(x => str(x.r.Касса_Key)), ...moves.flatMap(m => [str(m.Касса_Key), str(m.КассаПолучатель_Key)])];
+    const accounts = [
+        ...all.map(x => str(x.r.БанковскийСчет_Key)),
+        ...moves.flatMap(m => [str(m.БанковскийСчет_Key), str(m.БанковскийСчетПолучатель_Key)])
+    ];
+    const partnerKeys = all.map(x => str(x.r.Контрагент_Key));
+    const [partners, inns, articles, deskNames, accountNames, people] = await Promise.all([
+        resolveNames(cfg, 'Catalog_Контрагенты', partnerKeys),
+        resolveNames(cfg, 'Catalog_Контрагенты', partnerKeys, 'ИНН'),
+        resolveNames(cfg, 'Catalog_СтатьиДвиженияДенежныхСредств', [
+            ...all.map(x => str(x.r.Статья_Key)),
+            ...moves.map(m => str(m.Статья_Key)),
+            ...[...lineArticles.values()].flat().map(l => l.key)
+        ]),
+        resolveNames(cfg, 'Catalog_Кассы', desks),
+        resolveNames(cfg, 'Catalog_БанковскиеСчета', accounts),
+        resolveNames(cfg, 'Catalog_Сотрудники', all.map(x => str(x.r.Подотчетник_Key)))
     ]);
 
     const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
+    const placeOf = (cash: boolean, desk: unknown, account: unknown): string =>
+        cash ? deskNames.get(str(desk)) || 'касса без названия' : accountNames.get(str(account)) || 'счёт без названия';
+    const articleOf = (r: Record<string, unknown>): string => {
+        const lines = lineArticles.get(str(r.Ref_Key));
+        if (!lines || lines.length === 0) return articles.get(str(r.Статья_Key)) || '';
+        const uniq = [...new Set(lines.map(l => articles.get(l.key) || 'без статьи'))];
+        return uniq.length === 1 ? uniq[0]! : lines.map(l => `${articles.get(l.key) || 'без статьи'} ${l.sum}`).join('; ');
+    };
+    const clean = (...v: unknown[]): string =>
+        v
+            .map(x => str(x).replace(/\s+/g, ' ').trim())
+            .find(x => x !== '') ?? '';
 
-    return all
-        .map(({ src, r }) => ({
-            kind: src.kind as CashKind,
-            incoming: src.incoming,
-            number: String(r.Number ?? '').trim(),
-            date: String(r.Date ?? '').slice(0, 10),
-            sum: num(r.СуммаДокумента),
-            operation: String(r.ВидОперации ?? '').trim(),
-            partner: partners.get(String(r.Контрагент_Key ?? '')) || '',
-            article: articles.get(String(r.Статья_Key ?? '')) || '',
-            purpose: String(r.НазначениеПлатежа ?? r.Комментарий ?? '').replace(/\s+/g, ' ').trim()
-        }))
-        .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+    const rows: CashFlowRow[] = all.map(({ src, r }) => ({
+        kind: src.kind as CashKind,
+        incoming: src.incoming,
+        transfer: false,
+        number: str(r.Number).trim(),
+        date: str(r.Date).slice(0, 10),
+        sum: num(r.СуммаДокумента),
+        operation: str(r.ВидОперации).trim(),
+        partner: partners.get(str(r.Контрагент_Key)) || '',
+        partnerInn: inns.get(str(r.Контрагент_Key)) || '',
+        place: placeOf(src.kind === 'касса', r.Касса_Key, r.БанковскийСчет_Key),
+        personKey: str(r.Подотчетник_Key) === EMPTY_GUID ? '' : str(r.Подотчетник_Key),
+        person: people.get(str(r.Подотчетник_Key)) || '',
+        article: articleOf(r),
+        purpose: clean(r.НазначениеПлатежа, r.Комментарий, r.Основание)
+    }));
+    for (const m of moves) {
+        const fromCash = str(m.ТипДенежныхСредств) !== 'Безналичные';
+        const toCash = str(m.ТипДенежныхСредствПолучатель) !== 'Безналичные';
+        rows.push({
+            kind: fromCash ? 'касса' : 'счёт',
+            incoming: false,
+            transfer: true,
+            toKind: toCash ? 'касса' : 'счёт',
+            number: str(m.Number).trim(),
+            date: str(m.Date).slice(0, 10),
+            sum: num(m.СуммаДокумента),
+            operation: 'Перемещение',
+            partner: '',
+            partnerInn: '',
+            place: `${placeOf(fromCash, m.Касса_Key, m.БанковскийСчет_Key)} → ${placeOf(toCash, m.КассаПолучатель_Key, m.БанковскийСчетПолучатель_Key)}`,
+            personKey: '',
+            person: '',
+            article: articles.get(str(m.Статья_Key)) || '',
+            purpose: clean(m.Комментарий)
+        });
+    }
+    rows.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+
+    const value = { rows, capped };
+    // Протухшие выгрузки выбрасываем, чтобы память сервера не копила месяцы.
+    for (const [k, v] of cashCache) if (Date.now() - v.at >= CASH_TTL) cashCache.delete(k);
+    cashCache.set(cacheKey, { at: Date.now(), value });
+    return value;
 }

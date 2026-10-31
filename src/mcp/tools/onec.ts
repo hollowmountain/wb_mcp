@@ -11,14 +11,16 @@ import {
     isAllowed,
     isPersonal,
     countEntity,
+    getFinishedProductKeys,
     getOnecCashFlow,
     getOnecStock,
     getOnecStockValue,
     listEntity,
     resolveNames,
+    type CashFlowRow,
     type OnecEntity
 } from '../../onec/client.js';
-import { actorOf, fail, guarded, text } from './common.js';
+import { actorOf, amount, fail, guarded, pageOf, text } from './common.js';
 
 const dash = '—';
 
@@ -29,6 +31,15 @@ const money = (v: unknown): string =>
     typeof v === 'number' && Number.isFinite(v) ? `${v.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽` : dash;
 
 const day = (v: unknown): string => (typeof v === 'string' && v.length >= 10 ? v.slice(0, 10) : dash);
+
+/** Сумма в рублях всегда с копейками — для денежных отчётов: «1 234,50 ₽». */
+const rub = (v: number): string => `${amount(v)} ₽`;
+
+/** Настоящий ли это день календаря: «2026-02-30» Date съест молча и превратит в март. */
+const isDay = (s: string): boolean => {
+    const t = Date.parse(`${s}T00:00:00Z`);
+    return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === s;
+};
 
 /**
  * 1С разграничивается теми же областями, что и площадки: номенклатура — это
@@ -1145,14 +1156,22 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             title: '1С: запасы в деньгах',
             description:
                 'Денежная оценка запасов из регистра суммового учёта: сколько лежит на своих складах и ' +
-                'сколько передано контрагентам, с НДС и без. Это учётная себестоимость предприятия.',
+                'сколько передано контрагентам (это и товар на складах Wildberries и Ozon), с НДС и без. Это учётная ' +
+                'себестоимость предприятия. По каждой позиции — количество, сумма и стоимость одной единицы. ' +
+                'date — остаток на конец этого дня (для отчёта за месяц — последний день месяца), без даты — на сейчас. ' +
+                'finishedOnly — только готовая продукция (категория номенклатуры «ГП»): без сырья, тары, этикеток и ' +
+                'полуфабрикатов. Итоги вверху — по всем позициям, не по странице; таблица листается через offset, ' +
+                'ответ не больше 30 КБ.',
             inputSchema: {
                 search: z.string().optional().describe('Часть названия номенклатуры'),
                 where: z
                     .enum(['свои склады', 'у контрагентов', 'везде'])
                     .optional()
-                    .describe('Что показать. По умолчанию свои склады.'),
-                limit: z.number().int().min(1).max(200).optional().describe('Сколько позиций показать, по умолчанию 25')
+                    .describe('Что показать в таблице. По умолчанию свои склады; «везде» — вместе с товаром на складах маркетплейсов.'),
+                date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Остаток на конец этого дня, ГГГГ-ММ-ДД. Не указано — на сейчас.'),
+                finishedOnly: z.boolean().optional().describe('Только готовая продукция (категория номенклатуры «ГП»)'),
+                limit: z.number().int().min(1).max(500).optional().describe('Сколько позиций на странице, по умолчанию 25, до 500'),
+                offset: z.number().int().min(0).optional().describe('С какой позиции — для листания; номер следующей страницы пишется внизу ответа')
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -1161,11 +1180,33 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             if (!onecReady() || !inArea(actor, 'money')) {
                 return fail('Область «себестоимость, прибыль, реклама» вам не открыта. Обратитесь к администратору.');
             }
-            const rows = await getOnecStockValue(config.onec);
-            if (rows.length === 0) return text('Регистр суммового учёта запасов пуст.');
+            if (args.date && !isDay(args.date)) return fail(`Дата «${args.date}» не похожа на день календаря. Формат ГГГГ-ММ-ДД.`);
+            const [rows, finished] = await Promise.all([
+                getOnecStockValue(config.onec, args.date),
+                args.finishedOnly ? getFinishedProductKeys(config.onec) : Promise.resolve(null)
+            ]);
+            if (args.finishedOnly && !finished) {
+                return fail(
+                    'В справочнике категорий номенклатуры нет категории «ГП» — готовую продукцию отличить не по чему. ' +
+                        'Спросите без finishedOnly.'
+                );
+            }
+            const when = args.date ? `остаток на конец ${args.date}` : 'остаток на сейчас';
+            if (rows.length === 0) return text(`Регистр суммового учёта запасов пуст (${when}).`);
 
-            const own = rows.filter(r => !r.atPartner);
-            const atPartners = rows.filter(r => r.atPartner);
+            // Готовая продукция — по категории номенклатуры (см. getFinishedProductKeys).
+            const universe = finished ? rows.filter(r => finished.keys.has(r.productKey)) : rows;
+            // Строки на счетах затрат — незавершённое производство: сумма без
+            // количества. В таблицу и в стоимость одной штуки не идут, иначе
+            // цена единицы готовой продукции раздувалась бы чужими затратами.
+            const wip = universe.filter(r => r.inProduction);
+            const stock = universe.filter(r => !r.inProduction);
+            // Без фильтра ГП итоги вверху те же, что были всегда (с затратами);
+            // для ГП — только сами запасы, затраты отдельной строкой.
+            const headRows = finished ? stock : universe;
+
+            const own = headRows.filter(r => !r.atPartner);
+            const atPartners = headRows.filter(r => r.atPartner);
             const totals = (list: typeof rows) => ({
                 sum: list.reduce((s, r) => s + r.sum, 0),
                 noVat: list.reduce((s, r) => s + r.sumNoVat, 0),
@@ -1175,7 +1216,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             const p = totals(atPartners);
 
             const where = args.where ?? 'свои склады';
-            const chosen = where === 'у контрагентов' ? atPartners : where === 'везде' ? rows : own;
+            const chosen = where === 'у контрагентов' ? stock.filter(r => r.atPartner) : where === 'везде' ? stock : stock.filter(r => !r.atPartner);
             const needle = args.search?.trim().toLowerCase();
             const wanted = needle ? chosen.filter(r => r.product.toLowerCase().includes(needle)) : chosen;
 
@@ -1187,14 +1228,15 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 acc.noVat += r.sumNoVat;
                 byProduct.set(r.productKey, acc);
             }
-            const list = [...byProduct.values()].sort((a, b) => b.sum - a.sum).slice(0, args.limit ?? 25);
+            const list = [...byProduct.values()].sort((a, b) => b.sum - a.sum);
 
-            const negatives = rows.filter(r => r.sum < 0);
+            const negatives = universe.filter(r => r.sum < 0);
             const head = [
-                `ЗАПАСЫ В ДЕНЬГАХ (учётная себестоимость)`,
+                `ЗАПАСЫ В ДЕНЬГАХ (учётная себестоимость), ${when}`,
+                `База: 1С:УНФ, регистр «Запасы»${finished ? `. Только готовая продукция — категория номенклатуры «${finished.category}»` : ''}`,
                 '',
-                `Свои склады:     ${money(o.sum)}   без НДС ${money(o.noVat)}   позиций ${o.positions}`,
-                `У контрагентов:  ${money(p.sum)}   без НДС ${money(p.noVat)}   позиций ${p.positions}`
+                `Свои склады:     ${rub(o.sum)}   без НДС ${rub(o.noVat)}   позиций ${o.positions}`,
+                `У контрагентов:  ${rub(p.sum)}   без НДС ${rub(p.noVat)}   позиций ${p.positions}`
             ];
             // Складывать эти две части в одно число нельзя, пока по второй
             // сумма без НДС больше суммы с НДС: итог получился бы обманчивым.
@@ -1213,22 +1255,43 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     'не свожу в один итог. По своим складам всё обычно.'
                 );
             } else {
-                head.push('', `Всего: ${money(o.sum + p.sum)}   без НДС ${money(o.noVat + p.noVat)}`);
+                head.push('', `Всего: ${rub(o.sum + p.sum)}   без НДС ${rub(o.noVat + p.noVat)}`);
+            }
+            const wipSum = wip.reduce((s, r) => s + r.sum, 0);
+            if (Math.abs(wipSum) >= 0.005) {
+                head.push(
+                    '',
+                    finished
+                        ? `Кроме того, затраты в производстве по этой продукции (счета 20 и 25, без количества): ${rub(wipSum)} — ` +
+                              'в итоги выше, таблицу и стоимость 1 ед. не входят.'
+                        : `В том числе затраты в производстве (счета 20 и 25, без количества): ${rub(wipSum)} — ` +
+                              'в таблицу и стоимость 1 ед. не входят.'
+                );
             }
             if (negatives.length > 0) {
                 head.push(
                     '',
-                    `Строк с отрицательной суммой: ${negatives.length} на ${money(negatives.reduce((s, r) => s + r.sum, 0))}.`
+                    `Строк с отрицательной суммой: ${negatives.length} на ${rub(negatives.reduce((s, r) => s + r.sum, 0))}.`
                 );
             }
 
-            if (list.length === 0) return text([...head, '', `По запросу «${args.search}» ничего нет.`].join('\n'));
+            if (list.length === 0) {
+                return text([...head, '', needle ? `По запросу «${args.search}» ничего нет.` : `В разделе «${where}» позиций нет.`].join('\n'));
+            }
+            const qty = (v: number): string => v.toLocaleString('ru-RU', { maximumFractionDigits: 3 });
+            const sumAll = list.reduce((s, v) => s + v.sum, 0);
+            const top = [
+                ...head,
+                '',
+                `── ${where}${needle ? `, «${args.search}»` : ''}, по убыванию суммы ──`,
+                `Позиций: ${list.length}, на ${rub(sumAll)} (без НДС ${rub(list.reduce((s, v) => s + v.noVat, 0))})`,
+                'Номенклатура | Кол-во | Сумма, ₽ | За 1 ед., ₽ | Без НДС, ₽'
+            ].join('\n');
             const body = list.map(
-                v => `${v.name}\n   ${v.qty.toLocaleString('ru-RU')} ед. на ${money(v.sum)} (без НДС ${money(v.noVat)})`
+                v => `${v.name} | ${qty(v.qty)} | ${amount(v.sum)} | ${v.qty > 0 ? amount(v.sum / v.qty) : dash} | ${amount(v.noVat)}`
             );
-            return text(
-                [...head, '', `── ${where}, самые дорогие ──`, '', ...body].join('\n')
-            );
+            const page = pageOf(body, args.offset ?? 0, args.limit ?? 25, top);
+            return text([top, ...page.lines, page.footer].join('\n'));
         })
     );
 
@@ -1363,9 +1426,14 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
         {
             title: '1С: движение денег по кассе и счёту',
             description:
-                'Платежи за период: что пришло и что ушло, по кассе и расчётному счёту, с контрагентом и статьёй ДДС. ' +
-                'Единого журнала платежей в базе нет — приход и расход, касса и счёт лежат четырьмя разными документами, ' +
-                'здесь они сведены в одну ленту. Учитываются только проведённые и неудалённые документы.',
+                'Платежи за период из управленческой УНФ: касса, сейф, карты и расчётные счета — с контрагентом и ИНН, ' +
+                'кассой/картой/счётом, подотчётником и статьёй ДДС. Единого журнала платежей в базе нет — приход и расход, ' +
+                'касса и счёт лежат четырьмя разными документами, здесь они сведены в одну ленту; перемещения между своими ' +
+                'кассами и счетами показаны отдельно и в приход и расход не входят. Учитываются только проведённые и ' +
+                'неудалённые документы. Без groupBy — итоги, разбивка по кассам и счетам и последние платежи подробно. ' +
+                'groupBy=payment — все платежи периода компактной таблицей по дате; groupBy=counterparty — по контрагентам: ' +
+                'приход и расход раздельно, с числом платежей. Итоги — всегда по всем платежам периода, не по странице. ' +
+                'Ответ не больше 30 КБ, длинное листается через offset; страницы одного периода 10 минут берутся из одной выгрузки.',
             inputSchema: {
                 dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
                 dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
@@ -1374,8 +1442,22 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     .optional()
                     .describe('Только приход или только расход. Не указано — и то и другое.'),
                 where: z.enum(['касса', 'счёт']).optional().describe('Где смотреть. Не указано — везде.'),
-                search: z.string().optional().describe('Часть названия контрагента, статьи или назначения платежа'),
-                limit: z.number().int().min(1).max(100).optional().describe('Сколько платежей показать, по умолчанию 25')
+                search: z
+                    .string()
+                    .optional()
+                    .describe('Часть названия контрагента, ИНН, кассы или счёта, статьи или назначения платежа'),
+                groupBy: z
+                    .enum(['payment', 'counterparty'])
+                    .optional()
+                    .describe('payment — все платежи таблицей; counterparty — свод по контрагентам. Не указано — сводка.'),
+                offset: z.number().int().min(0).optional().describe('С какой строки — для листания; номер следующей страницы пишется внизу ответа'),
+                limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(500)
+                    .optional()
+                    .describe('Сколько строк на странице: в сводке по умолчанию 25, в payment и counterparty — 500')
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -1386,16 +1468,29 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             }
             const from = args.dateFrom.slice(0, 10);
             const to = args.dateTo.slice(0, 10);
-            const all = await getOnecCashFlow(config.onec, from, to);
+            if (from > to) return fail('Начало периода позже конца.');
+            const { rows: all, capped } = await getOnecCashFlow(config.onec, from, to);
+
+            // Выдача зарплаты наличными: получатель стоит в поле «подотчётник».
+            // Кто сколько получил — это область payroll, как и в бухгалтерии;
+            // сумма и сама строка видны, как и раньше, скрыто только имя.
+            const payroll = inArea(actor, 'payroll');
+            const personOf = (r: CashFlowRow): string =>
+                !r.personKey ? '' : /Зарплат/i.test(r.operation) && !payroll ? 'сотрудник (имя — с областью payroll)' : r.person || 'без имени';
 
             const needle = args.search?.trim().toLowerCase();
             const picked = all.filter(r => {
+                // Перемещение — и приход, и расход одновременно: при отборе по
+                // направлению его не показываем.
+                if (r.transfer && args.direction) return false;
                 if (args.direction === 'приход' && !r.incoming) return false;
                 if (args.direction === 'расход' && r.incoming) return false;
-                if (args.where && r.kind !== args.where) return false;
+                if (args.where && r.kind !== args.where && !(r.transfer && r.toKind === args.where)) return false;
                 if (!needle) return true;
-                return `${r.partner} ${r.article} ${r.purpose}`.toLowerCase().includes(needle);
+                return `${r.partner} ${r.partnerInn} ${r.place} ${personOf(r)} ${r.article} ${r.purpose}`.toLowerCase().includes(needle);
             });
+            const pays = picked.filter(r => !r.transfer);
+            const moves = picked.filter(r => r.transfer);
 
             if (picked.length === 0) {
                 return text(`Проведённых платежей за ${from} — ${to} по этим условиям нет.`);
@@ -1404,33 +1499,131 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             // Итоги считаем по ВСЕМ отобранным, а не по показанным: иначе
             // «пришло столько-то» означало бы «пришло столько-то в первых
             // двадцати пяти строках», а это разные числа.
-            const inSum = picked.filter(r => r.incoming).reduce((a, r) => a + r.sum, 0);
-            const outSum = picked.filter(r => !r.incoming).reduce((a, r) => a + r.sum, 0);
+            const inRows = pays.filter(r => r.incoming);
+            const outRows = pays.filter(r => !r.incoming);
+            const inSum = inRows.reduce((a, r) => a + r.sum, 0);
+            const outSum = outRows.reduce((a, r) => a + r.sum, 0);
+            const moveSum = moves.reduce((a, r) => a + r.sum, 0);
 
-            const asked = args.limit ?? 25;
-            const shown = picked.slice(0, asked);
-
+            const filters = [
+                args.direction ? `только ${args.direction}` : '',
+                args.where ? `только ${args.where}` : '',
+                needle ? `поиск «${args.search}»` : ''
+            ].filter(Boolean);
             const head = [
-                `Платежей за ${from} — ${to}: ${picked.length}`,
-                `Пришло: ${money(inSum)}   ·   ушло: ${money(outSum)}   ·   разница: ${money(inSum - outSum)}`,
-                ''
+                '1С:УНФ (управленческий учёт): касса, карты, расчётные счета — только проведённые документы',
+                `Период: ${from} — ${to}${filters.length ? ` · отбор: ${filters.join(', ')}` : ''}`,
+                `Платежей: ${pays.length} (приход ${inRows.length}, расход ${outRows.length})` +
+                    (moves.length ? ` · перемещений между своими кассами и счетами: ${moves.length} на ${rub(moveSum)} — в приход и расход не входят` : ''),
+                `Пришло: ${rub(inSum)}   ·   ушло: ${rub(outSum)}   ·   разница: ${rub(inSum - outSum)}`
             ];
+            if (capped.length > 0) {
+                head.push(`ВНИМАНИЕ: по ${capped.join(', ')} документов больше предела выгрузки — итоги НЕ полные. Возьмите период короче.`);
+            }
 
-            const lines = shown.map(r => {
-                const sign = r.incoming ? '+' : '−';
-                const who = r.partner || r.operation || '';
+            const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+            const signed = (r: CashFlowRow): string => `${r.transfer ? '⇄' : r.incoming ? '+' : '−'}${amount(r.sum)}`;
+
+            if (args.groupBy === 'payment') {
+                // Хронологически, приход раньше расхода, дальше по номеру —
+                // порядок устойчивый, чтобы offset между страницами не плыл.
+                const ordered = [...picked].sort(
+                    (a, b) =>
+                        a.date.localeCompare(b.date) ||
+                        Number(b.incoming) - Number(a.incoming) ||
+                        Number(a.transfer) - Number(b.transfer) ||
+                        a.number.localeCompare(b.number)
+                );
+                const top = [
+                    ...head,
+                    '',
+                    'Дата | № документа | Сумма, ₽ (+ приход, − расход, ⇄ перемещение) | Касса/карта/счёт | Контрагент | ИНН | Подотчётник | Статья ДДС | Назначение',
+                    ''
+                ].join('\n');
+                const body = ordered.map(r =>
+                    [
+                        r.date,
+                        r.number || dash,
+                        signed(r),
+                        r.place,
+                        cut(r.partner, 60) || dash,
+                        r.partnerInn || dash,
+                        personOf(r) || dash,
+                        r.article || r.operation || dash,
+                        cut(r.purpose, 150) || dash
+                    ].join(' | ')
+                );
+                const page = pageOf(body, args.offset ?? 0, args.limit ?? 500, top);
+                return text([top, ...page.lines, page.footer].join('\n'));
+            }
+
+            if (args.groupBy === 'counterparty') {
+                // Без контрагента — покупки по карте, комиссии, снятие наличных:
+                // их не сваливаем в одну кучу, а делим по подотчётнику и виду операции.
+                const groups = new Map<string, { name: string; inn: string; inSum: number; inN: number; outSum: number; outN: number }>();
+                for (const r of pays) {
+                    const person = personOf(r);
+                    const key = r.partner ? `к:${r.partner}|${r.partnerInn}` : person ? `п:${person}` : `о:${r.operation}`;
+                    const name = r.partner || (person ? `подотчётник: ${person}` : `без контрагента: ${r.operation || 'операция не указана'}`);
+                    const g = groups.get(key) ?? { name, inn: r.partnerInn, inSum: 0, inN: 0, outSum: 0, outN: 0 };
+                    if (r.incoming) {
+                        g.inSum += r.sum;
+                        g.inN += 1;
+                    } else {
+                        g.outSum += r.sum;
+                        g.outN += 1;
+                    }
+                    groups.set(key, g);
+                }
+                const ordered = [...groups.values()].sort((a, b) => b.inSum + b.outSum - (a.inSum + a.outSum));
+                const top = [
+                    ...head,
+                    '',
+                    `Контрагентов и групп: ${ordered.length}. Перемещения между своими кассами сюда не входят.`,
+                    'Контрагент | ИНН | Пришло, ₽ / платежей | Ушло, ₽ / платежей',
+                    ''
+                ].join('\n');
+                const body = ordered.map(g =>
+                    [cut(g.name, 80), g.inn || dash, `${amount(g.inSum)} / ${g.inN}`, `${amount(g.outSum)} / ${g.outN}`].join(' | ')
+                );
+                const page = pageOf(body, args.offset ?? 0, args.limit ?? 500, top);
+                return text([top, ...page.lines, page.footer].join('\n'));
+            }
+
+            // Сводка: разбивка по кассам и счетам и последние платежи подробно.
+            const byPlace = new Map<string, { inSum: number; outSum: number; n: number }>();
+            for (const r of pays) {
+                const v = byPlace.get(r.place) ?? { inSum: 0, outSum: 0, n: 0 };
+                if (r.incoming) v.inSum += r.sum;
+                else v.outSum += r.sum;
+                v.n += 1;
+                byPlace.set(r.place, v);
+            }
+            const places = [...byPlace].sort((a, b) => b[1].inSum + b[1].outSum - (a[1].inSum + a[1].outSum));
+            const top = [
+                ...head,
+                '',
+                'По кассам, картам и счетам (без перемещений):',
+                ...places.map(([name, v]) => `   ${name}: пришло ${rub(v.inSum)}, ушло ${rub(v.outSum)} (${v.n} пл.)`),
+                '',
+                'Все платежи таблицей — groupBy=payment, свод по контрагентам — groupBy=counterparty.',
+                ''
+            ].join('\n');
+            const lines = picked.map(r => {
+                const sign = r.transfer ? '⇄' : r.incoming ? '+' : '−';
+                const person = personOf(r);
+                const who = [r.partner ? `${r.partner}${r.partnerInn ? ` (ИНН ${r.partnerInn})` : ''}` : r.operation, person ? `подотчётник: ${person}` : '']
+                    .filter(Boolean)
+                    .join(' · ');
                 const tail = [r.article, r.purpose].filter(Boolean).join(' · ');
                 return (
-                    `${sign} ${money(r.sum)}  ${r.date}  ${r.kind}  № ${r.number || dash}` +
+                    `${sign} ${rub(r.sum)}  ${r.date}  ${r.kind} «${r.place}»  № ${r.number || dash}` +
                     (who ? `\n     ${who}` : '') +
                     (tail ? `\n     ${tail.slice(0, 160)}` : '')
                 );
             });
-
-            const more =
-                picked.length > shown.length ? [``, `… ещё платежей: ${picked.length - shown.length}`] : [];
-
-            return text([...head, ...lines, ...more].join('\n'));
+            const page = pageOf(lines, args.offset ?? 0, args.limit ?? 25, top);
+            return text([top, ...page.lines, '', page.footer].join('\n'));
         })
     );
 }
