@@ -24,10 +24,12 @@ import {
     daysInclusive,
     emptyMetrics,
     FinanceLoading,
+    isRealDate,
     loadAdSpend,
     loadPaidStorage,
     loadRealization,
     METRICS,
+    missingWeeks,
     mondayOf,
     realizationClosed,
     storageClosed,
@@ -68,6 +70,14 @@ const limitArg = z
     .optional()
     .describe(`Сколько строк таблицы показать, по умолчанию ${DEFAULT_LIMIT}, максимум ${MAX_LIMIT}. Итоги — всегда по всем строкам.`);
 
+const refreshArg = z
+    .boolean()
+    .optional()
+    .describe(
+        'true — перекачать период с WB мимо кэша сервера и перезаписать кэш. Нужно, если WB задним числом поправил данные ' +
+            'или цифры вызывают сомнение. Выгрузка снова займёт минуты; без нужды не включайте.'
+    );
+
 // ─── Оформление ──────────────────────────────────────────────────────────────
 
 /**
@@ -94,7 +104,10 @@ function originLine(snap: FinanceSnapshot<unknown>, closed: boolean): string {
             : age === 0
               ? 'выгружено с WB только что'
               : `выгружено с WB ${age} мин назад`;
-    return closed ? `Данные: ${when}. Период закрыт.` : `Данные: ${when}. Период ещё открыт — WB может дописать строки.`;
+    if (snap.final) return `Данные: ${when}. Период закрыт, выгрузка сохранена на сервере.`;
+    return closed
+        ? `Данные: ${when}. По датам период закрыт, но выгрузка неполная — на сервере не сохранена, следующий вызов скачает заново.`
+        : `Данные: ${when}. Период ещё открыт — WB может дописать строки.`;
 }
 
 /**
@@ -135,7 +148,8 @@ function loadingText(e: FinanceLoading, what: string, retry: string): string {
 }
 
 function checkPeriod(from: string, to: string): string | null {
-    if (Number.isNaN(Date.parse(from)) || Number.isNaN(Date.parse(to))) return 'Не удалось разобрать даты периода.';
+    // 2026-04-31 формат проходит, но такой даты нет: молча сдвинуть её на 1 мая хуже отказа.
+    for (const d of [from, to]) if (!isRealDate(d)) return `Даты ${d} не существует. Нужна настоящая дата в виде 2026-08-03.`;
     if (from > to) return `Начало периода ${from} позже конца ${to}.`;
     const days = daysInclusive(from, to);
     if (days > MAX_DAYS) return `Период ${days} дн. — длиннее ${MAX_DAYS}. Запросите по месяцам.`;
@@ -204,6 +218,15 @@ const SIGNS_NOTE =
     'storage_fee, deduction, acceptance, additional_payment, rebill_logistic_cost и поля лояльности — как в отчёте WB: ' +
     'удержание положительным числом, в P&L его вычитают.';
 
+/**
+ * Удержание за рекламу. Реклама, оплаченная с баланса, WB списывает и в
+ * истории затрат продвижения (wb_ad_spend), и удержанием в отчёте о
+ * реализации — это одни и те же деньги: в августе 2026 суммы документов
+ * совпали до рубля. Пишет WB и «WB Продвижение», и «ВБ.Продвижение».
+ */
+const ADS_REASON = /(WB|ВБ)[.\s]*Продвижени/iu;
+const ADS_MARK = ' [уже в wb_ad_spend]';
+
 type GroupBy = 'report' | 'sku' | 'report_sku' | 'operation' | 'deduction';
 
 function summarize(groups: RealizationGroup[], fields: string[]): Metrics {
@@ -224,6 +247,9 @@ function realizationText(
     const closed = realizationClosed(to);
     const reportById = new Map(reports.map(r => [r.id, r]));
     const total = summarize(groups, fields);
+    const deductionAt = fields.indexOf('deduction');
+    const deductionOf = (g: RealizationGroup): number => (deductionAt < 0 ? 0 : (g.sums[deductionAt] ?? 0));
+    const adsInDeduction = groups.filter(g => ADS_REASON.test(g.bonus || g.oper)).reduce((s, g) => s + deductionOf(g), 0);
 
     const kinds = new Map<number, number>();
     for (const r of reports) kinds.set(r.type, (kinds.get(r.type) ?? 0) + 1);
@@ -243,9 +269,27 @@ function realizationText(
         );
     }
 
+    // Неделя без единого отчёта — почти наверняка отчёт, который WB ещё не
+    // сформировал. Итог без него занижен; навсегда такой период не сохраняется.
+    const missing = missingWeeks(reports, from, to);
+    if (missing.length > 0) {
+        head.push(
+            `⚠ Нет ни одного отчёта за неделю: ${missing.join(', ')}. Скорее всего, WB его ещё не сформировал — ` +
+                'итог по периоду неполный. Повторите позже (refresh=true не нужен: неполный период и так не сохраняется).'
+        );
+    }
+
     const shownMetrics = METRICS.filter(m => Math.round(total[m] * 100) !== 0);
     head.push('Итог за период: ' + shownMetrics.map(m => `${m} ${fmtMetric(m, total[m])}`).join(' | '));
     head.push('Метрики: ' + shownMetrics.map(m => `${m} — ${METRIC_NOTES[m]}`).join('; ') + '.');
+    if (Math.round(total.storage_fee * 100) !== 0 || Math.round(total.deduction * 100) !== 0) {
+        head.push(
+            `⚠ Не считайте в P&L дважды. storage_fee ${money(total.storage_fee)} — то же платное хранение, что отдаёт wb_paid_storage. ` +
+                `deduction ${money(total.deduction)} включает рекламу «WB Продвижение» ${money(adsInDeduction)} — те же деньги, что списания ` +
+                'в wb_ad_spend (оплаченные с баланса). В P&L хранение берите из wb_paid_storage, рекламу — из wb_ad_spend, ' +
+                `а из deduction — только прочие удержания: ${money(total.deduction - adsInDeduction)} (разбивка — groupBy=deduction).`
+        );
+    }
 
     if (args.mode === 'raw') {
         // Суммы всех числовых полей по типу документа × обоснованию — для сверок
@@ -286,9 +330,8 @@ function realizationText(
         // рекламы стала бы отдельным видом.
         const byReason = new Map<string, { report: number; reason: string; amount: number; rows: number }>();
         const reasonTotals = new Map<string, number>();
-        const i = fields.indexOf('deduction');
         for (const g of groups) {
-            const amount = i < 0 ? 0 : (g.sums[i] ?? 0);
+            const amount = deductionOf(g);
             if (amount === 0) continue;
             const reason = g.bonus || g.oper || '(основание не указано)';
             const key = `${g.report}\u0001${reason}`;
@@ -303,7 +346,7 @@ function realizationText(
             'Удержания по видам основания за период (без номеров документов): ' +
                 ([...reasonTotals.entries()]
                     .sort((a, b) => b[1] - a[1])
-                    .map(([reason, v]) => `${reason} ${money(v)}`)
+                    .map(([reason, v]) => `${reason}${ADS_REASON.test(reason) ? ADS_MARK : ''} ${money(v)}`)
                     .join(' | ') || 'нет')
         );
         columns = ['realizationreport_id', 'date_from', 'date_to', 'основание', 'deduction', 'строк'];
@@ -315,9 +358,13 @@ function realizationText(
             })
             .map(d => {
                 const r = reportById.get(d.report);
-                return [String(d.report), r?.dateFrom ?? '', r?.dateTo ?? '', d.reason, money(d.amount), String(d.rows)];
+                const reason = d.reason + (ADS_REASON.test(d.reason) ? ADS_MARK : '');
+                return [String(d.report), r?.dateFrom ?? '', r?.dateTo ?? '', reason, money(d.amount), String(d.rows)];
             });
-        head.push('deduction — как в отчёте WB: удержание положительным числом.');
+        head.push(
+            `deduction — как в отчёте WB: удержание положительным числом. Строки с пометкой${ADS_MARK} — реклама, ` +
+                'оплаченная с баланса: она уже есть в wb_ad_spend, в P&L второй раз её не вычитайте.'
+        );
     } else {
         // Свод метрик по ключу разреза.
         const keyOf = (g: RealizationGroup): string => {
@@ -445,6 +492,12 @@ function storageText(
         `Источник: ${snap.sourceRows} строк отчёта о платном хранении (товар × склад × день), окна по 8 дней склеены. ${originLine(snap, storageClosed(to))}`,
         `Итог: хранение ${money(total)} ₽ (расход — с минусом; сторно хранения уже учтено).`
     ];
+    if (snap.data.emptyWindows.length > 0) {
+        head.push(
+            `⚠ По окнам ${snap.data.emptyWindows.join(', ')} WB не прислал ни строки. Если товар в эти дни лежал на складах WB, ` +
+                'отчёт ещё не досчитан — итог занижен. Такой период на сервере не сохраняется; повторите позже.'
+        );
+    }
 
     const acc = new Map<string, { key: string[]; amount: number; days: Set<string> }>();
     for (const [date, nmId, article, amount] of entries) {
@@ -589,10 +642,13 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
                 'sales_cnt: +1 продажа, −1 возврат, 0 для частичной компенсации брака; deliveries_cnt — строк с логистикой, ' +
                 'deliveries_to_client_cnt — из них «К клиенту при продаже/отмене». Доход с плюсом, расходы с минусом; ' +
                 'storage_fee, deduction, acceptance, additional_payment и поля лояльности и кешбэка — как в отчёте WB (удержание положительным). ' +
+                'ВНИМАНИЕ, двойной счёт: storage_fee — то же хранение, что wb_paid_storage, а удержание «WB Продвижение» в deduction — та же ' +
+                'реклама, что wb_ad_spend. В P&L хранение и рекламу берите из тех инструментов, из deduction — только прочие удержания ' +
+                '(в ответе посчитаны отдельно, в groupBy=deduction реклама помечена). ' +
                 'mode=raw — суммы всех числовых полей отчёта по типу документа × обоснованию, для сверок. ' +
                 'Период — по дате строки отчёта, как фильтрует WB; отчёты недельные пн–вс, поэтому для месяца берите недели целиком: ' +
                 'август 2026 — 2026-08-03 … 2026-08-30. До 93 дней. WB отдаёт детализацию раз в минуту и медленно: если данные ' +
-                'не готовы, инструмент скажет, когда повторить. Закрытый период хранится на сервере и второй раз не качается.',
+                'не готовы, инструмент скажет, когда повторить. Закрытый период с отчётами за все недели хранится на сервере и второй раз не качается; перекачать — refresh=true.',
             inputSchema: {
                 cabinet: cabinetArg,
                 dateFrom: dateArg('Начало периода, дата строки отчёта: 2026-08-03 (понедельник)'),
@@ -603,7 +659,8 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
                     .describe('Разрез: report (по умолчанию), sku, report_sku, operation, deduction'),
                 mode: z.enum(['metrics', 'raw']).optional().describe('metrics (по умолчанию) — метрики финансиста; raw — суммы всех полей WB'),
                 offset: offsetArg,
-                limit: limitArg
+                limit: limitArg,
+                refresh: refreshArg
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -618,7 +675,7 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
             };
             return overCabinets(actorOf(extra), args.cabinet, async (cabinet, budget) => {
                 try {
-                    const snap = await loadRealization(cabinet, args.dateFrom, args.dateTo, WAIT_MS);
+                    const snap = await loadRealization(cabinet, args.dateFrom, args.dateTo, { waitMs: WAIT_MS, refresh: args.refresh });
                     return realizationText(cabinet, args.dateFrom, args.dateTo, snap, opts, budget);
                 } catch (e) {
                     if (e instanceof FinanceLoading) {
@@ -641,14 +698,15 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
                 'Хранение — расход, отдаётся с минусом; сторно хранения уже учтено. Период — по дате начисления. ' +
                 'Финансист берёт для месяца те же недели, что и отчёты о реализации: август 2026 — 2026-08-03 … 2026-08-30 ' +
                 '(так сошлось с его файлом до рубля). До 93 дней. Подготовка у WB долгая: если данные не готовы, ' +
-                'инструмент скажет, когда повторить. Закрытый период хранится на сервере.',
+                'инструмент скажет, когда повторить. Закрытый период хранится на сервере; перекачать — refresh=true.',
             inputSchema: {
                 cabinet: cabinetArg,
                 dateFrom: dateArg('Начало периода, дата начисления: 2026-08-03'),
                 dateTo: dateArg('Конец периода включительно: 2026-08-30'),
                 groupBy: z.enum(['day', 'week', 'sku']).optional().describe('Разрез: day (по умолчанию), week, sku'),
                 offset: offsetArg,
-                limit: limitArg
+                limit: limitArg,
+                refresh: refreshArg
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -658,7 +716,7 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
             const opts = { groupBy: args.groupBy ?? 'day', offset: args.offset ?? 0, limit: args.limit ?? DEFAULT_LIMIT };
             return overCabinets(actorOf(extra), args.cabinet, async (cabinet, budget) => {
                 try {
-                    const snap = await loadPaidStorage(cabinet, args.dateFrom, args.dateTo, WAIT_MS);
+                    const snap = await loadPaidStorage(cabinet, args.dateFrom, args.dateTo, { waitMs: WAIT_MS, refresh: args.refresh });
                     return storageText(cabinet, args.dateFrom, args.dateTo, snap, opts, budget);
                 } catch (e) {
                     if (e instanceof FinanceLoading) return loadingText(e, `Платное хранение ${cabinet.slug}`, 'через 1–2 минуты');
@@ -680,14 +738,15 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
                 'недели, что и отчёты о реализации: для августа 2026 — 2026-08-03 … 2026-08-30. До 93 дней. ' +
                 'При groupBy=sku кампания с одним nmId относится на него целиком; разбивки списания кампании с несколькими ' +
                 'nmId WB не даёт — такая кампания идёт отдельной строкой со списком nmId, без выдуманных долей. ' +
-                'Состав кампаний — текущий: истории состава WB не хранит.',
+                'Состав кампаний — текущий: истории состава WB не хранит. Закрытый период хранится на сервере; перекачать — refresh=true.',
             inputSchema: {
                 cabinet: cabinetArg,
                 dateFrom: dateArg('Начало периода, дата списания: 2026-08-03'),
                 dateTo: dateArg('Конец периода включительно: 2026-08-30'),
                 groupBy: z.enum(['day', 'campaign', 'sku']).optional().describe('Разрез: day (по умолчанию), campaign, sku'),
                 offset: offsetArg,
-                limit: limitArg
+                limit: limitArg,
+                refresh: refreshArg
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -697,7 +756,7 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
             const opts = { groupBy: args.groupBy ?? 'day', offset: args.offset ?? 0, limit: args.limit ?? DEFAULT_LIMIT };
             return overCabinets(actorOf(extra), args.cabinet, async (cabinet, budget) => {
                 try {
-                    const snap = await loadAdSpend(cabinet, args.dateFrom, args.dateTo, WAIT_MS);
+                    const snap = await loadAdSpend(cabinet, args.dateFrom, args.dateTo, { waitMs: WAIT_MS, refresh: args.refresh });
                     return adSpendText(cabinet, args.dateFrom, args.dateTo, snap, opts, budget);
                 } catch (e) {
                     if (e instanceof FinanceLoading) return loadingText(e, `Реклама ${cabinet.slug}`, 'через минуту');

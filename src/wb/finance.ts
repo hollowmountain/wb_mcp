@@ -43,18 +43,40 @@ export function mondayOf(iso: string): string {
 
 /** Дата по Москве из отметки времени с любым поясом. */
 const mskDateOf = (stamp: string): string => new Date(Date.parse(stamp) + MSK_MS).toISOString().slice(0, 10);
-const utcDateOf = (stamp: string): string => new Date(Date.parse(stamp)).toISOString().slice(0, 10);
+
+/**
+ * Настоящая ли это дата. Date.parse('2026-04-31') молча даёт 1 мая, и период
+ * уехал бы на день без единого слова — поэтому сверяем дату с её же записью.
+ */
+export function isRealDate(iso: string): boolean {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false;
+    const t = Date.parse(`${iso}T00:00:00Z`);
+    return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === iso;
+}
 
 export const daysInclusive = (from: string, to: string): number =>
     Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS) + 1;
 
-/** Режет период на куски не длиннее size дней, концы включительно. */
-function windows(from: string, to: string, size: number): Array<[string, string]> {
+/**
+ * Режет период на куски не длиннее size дней, концы включительно. overlap —
+ * на сколько дней следующий кусок заходит на предыдущий: там, где источник
+ * режет даты не так, как мы (реклама — по UTC), стык окон не теряет строк,
+ * а повторы потом убираются.
+ */
+function windows(from: string, to: string, size: number, overlap = 0): Array<[string, string]> {
     const out: Array<[string, string]> = [];
-    for (let start = from; start <= to; start = addDays(start, size)) {
+    for (let start = from; ; start = addDays(start, size - overlap)) {
         const end = addDays(start, size - 1);
         out.push([start, end < to ? end : to]);
+        if (end >= to) break;
     }
+    return out;
+}
+
+/** Недели пн–вс, которые задевает период: [понедельник, воскресенье]. */
+export function weeksOf(from: string, to: string): Array<[string, string]> {
+    const out: Array<[string, string]> = [];
+    for (let monday = mondayOf(from); monday <= to; monday = addDays(monday, 7)) out.push([monday, addDays(monday, 6)]);
     return out;
 }
 
@@ -83,48 +105,59 @@ async function eachJsonObject(
     // Что лежит на верхнем уровне: '[' — массив строк, '{' — объект (ошибка или конверт).
     let top = '';
 
-    for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-
-        if (!top) {
-            const first = buf.trimStart()[0];
-            if (!first) continue;
-            top = first;
-        }
-        if (top !== '[') continue; // не массив — дочитаем целиком и разберём ниже
-
-        for (; pos < buf.length; pos++) {
-            const ch = buf[pos];
-            if (inString) {
-                if (escaped) escaped = false;
-                else if (ch === '\\') escaped = true;
-                else if (ch === '"') inString = false;
-                continue;
-            }
-            if (ch === '"') inString = true;
-            else if (ch === '{') {
-                if (depth === 0) start = pos;
-                depth++;
-            } else if (ch === '}') {
-                depth--;
-                if (depth === 0 && start >= 0) {
-                    onObject(JSON.parse(buf.slice(start, pos + 1)) as Record<string, unknown>);
-                    start = -1;
-                }
-            }
-        }
-        // Разобранное выбрасываем, недоразобранный объект оставляем в начале буфера.
-        const cut = start >= 0 ? start : pos;
-        buf = buf.slice(cut);
-        pos -= cut;
-        if (start >= 0) start = 0;
+    try {
+        await readAll();
+    } catch (e) {
+        // Бросили разбор посреди тела (строки не по порядку, битый JSON) — закрываем
+        // поток, иначе соединение висело бы до часового таймаута запроса.
+        await reader.cancel().catch(() => undefined);
+        throw e;
     }
 
     if (top && top !== '[') {
         buf += decoder.decode();
         throw new WbApiError(`WB ответил не списком строк: ${buf.slice(0, 300)}`, res.status, category, new URL(res.url).pathname);
+    }
+
+    async function readAll(): Promise<void> {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) return;
+            buf += decoder.decode(value, { stream: true });
+
+            if (!top) {
+                const first = buf.trimStart()[0];
+                if (!first) continue;
+                top = first;
+            }
+            if (top !== '[') continue; // не массив — дочитаем целиком и разберём ниже
+
+            for (; pos < buf.length; pos++) {
+                const ch = buf[pos];
+                if (inString) {
+                    if (escaped) escaped = false;
+                    else if (ch === '\\') escaped = true;
+                    else if (ch === '"') inString = false;
+                    continue;
+                }
+                if (ch === '"') inString = true;
+                else if (ch === '{') {
+                    if (depth === 0) start = pos;
+                    depth++;
+                } else if (ch === '}') {
+                    depth--;
+                    if (depth === 0 && start >= 0) {
+                        onObject(JSON.parse(buf.slice(start, pos + 1)) as Record<string, unknown>);
+                        start = -1;
+                    }
+                }
+            }
+            // Разобранное выбрасываем, недоразобранный объект оставляем в начале буфера.
+            const cut = start >= 0 ? start : pos;
+            buf = buf.slice(cut);
+            pos -= cut;
+            if (start >= 0) start = 0;
+        }
     }
 }
 
@@ -139,7 +172,29 @@ export interface FinanceSnapshot<T> {
     fetchedAt: number;
     /** Откуда взято: из базы (закрытый период), из памяти или только что с WB. */
     origin: 'cache' | 'memory' | 'wb';
+    /**
+     * Период закрыт и данные полны — лежат в базе и больше не перекачиваются.
+     * false — открытый период или неполная выгрузка: держится в памяти недолго.
+     */
+    final: boolean;
 }
+
+export interface LoadOptions {
+    /** Сколько вызов ждёт загрузку, прежде чем ответить «ещё идёт». */
+    waitMs: number;
+    /** Перекачать мимо кэша и перезаписать его: если WB задним числом поправил отчёт. */
+    refresh?: boolean;
+}
+
+/**
+ * Версия формата записи в wb_fin_cache. Агрегаты лежат позиционными массивами
+ * (PackedGroup, StorageEntry, AdCharge), и правка их состава без смены версии
+ * читала бы старые записи со сдвигом полей — молча и правдоподобно. Меняли
+ * состав любого из них — поднимите число: старые записи перекачаются сами.
+ *   1 — первая выкладка 31.10.2026, записи без версии;
+ *   2 — версия в записи, у хранения появились пустые окна (emptyWindows).
+ */
+const CACHE_FORMAT = 2;
 
 /**
  * Загрузка не уложилась в ожидание вызова и продолжается на сервере.
@@ -186,8 +241,13 @@ function fromDb<T>(cabinet: Cabinet, kind: FinanceKind, from: string, to: string
         | undefined;
     if (!row) return undefined;
     try {
-        const data = JSON.parse(inflateSync(row.payload).toString('utf8')) as T;
-        return { data, sourceRows: row.source_rows, fetchedAt: row.fetched_at, origin: 'cache' };
+        const stored = JSON.parse(inflateSync(row.payload).toString('utf8')) as { v?: number; data?: T };
+        if (stored?.v !== CACHE_FORMAT || stored.data === undefined) {
+            // Запись старого формата: читать её со сдвигом полей нельзя — перекачаем.
+            logger.info({ cabinet: cabinet.slug, kind, from, to, v: stored?.v ?? 1 }, 'wb_fin_cache: запись старого формата');
+            return undefined;
+        }
+        return { data: stored.data, sourceRows: row.source_rows, fetchedAt: row.fetched_at, origin: 'cache', final: true };
     } catch (e) {
         // Битая запись не повод падать: скачаем заново и перезапишем.
         logger.warn({ cabinet: cabinet.slug, kind, from, to, err: (e as Error).message }, 'wb_fin_cache: запись не читается');
@@ -200,8 +260,10 @@ function fromDb<T>(cabinet: Cabinet, kind: FinanceKind, from: string, to: string
  * Вызов ждёт её не дольше waitMs; не дождался — FinanceLoading с прогрессом,
  * а загрузка продолжается, и следующий вызов подхватит её же или готовый кэш.
  *
- * closed — период закрыт и больше не изменится: результат ляжет в SQLite
- * навсегда. Открытый период живёт в памяти OPEN_TTL_MS.
+ * closed — по датам период закрыт и больше не изменится. В SQLite навсегда
+ * результат ложится, только если ещё и complete(data) — выгрузка полна:
+ * WB мог не успеть сформировать отчёт, и тогда «навсегда» запомнилась бы дыра.
+ * Всё остальное живёт в памяти OPEN_TTL_MS. refresh — мимо кэша, с перезаписью.
  */
 export async function loadFinance<T>(
     kind: FinanceKind,
@@ -210,17 +272,20 @@ export async function loadFinance<T>(
     to: string,
     closed: boolean,
     fetcher: (report: (progress: string) => void) => Promise<{ data: T; sourceRows: number }>,
-    waitMs: number
+    opts: LoadOptions,
+    complete: (data: T) => boolean = () => true
 ): Promise<FinanceSnapshot<T>> {
     const key = `${kind}:${cabinet.slug}:${from}:${to}`;
 
-    if (closed) {
-        const stored = fromDb<T>(cabinet, kind, from, to);
-        if (stored) return stored;
+    if (!opts.refresh) {
+        if (closed) {
+            const stored = fromDb<T>(cabinet, kind, from, to);
+            if (stored) return stored;
+        }
+        const hit = memoryCache.get(key);
+        if (hit && Date.now() - hit.fetchedAt < OPEN_TTL_MS) return { ...(hit as FinanceSnapshot<T>), origin: 'memory' };
+        if (hit) memoryCache.delete(key);
     }
-    const hit = memoryCache.get(key);
-    if (hit && Date.now() - hit.fetchedAt < OPEN_TTL_MS) return { ...(hit as FinanceSnapshot<T>), origin: 'memory' };
-    if (hit) memoryCache.delete(key);
 
     // Фоновая загрузка упала, когда её никто не ждал, — сначала скажем об этом.
     const failed = failures.get(key);
@@ -229,6 +294,7 @@ export async function loadFinance<T>(
         if (Date.now() - failed.at < FAILURE_TTL_MS && !jobs.has(key)) throw failed.error;
     }
 
+    // Идущая загрузка и так свежая — refresh к ней просто присоединяется.
     let job = jobs.get(key);
     if (!job) {
         const fresh: Job = { promise: undefined as never, progress: 'запрос отправлен в WB', startedAt: Date.now() };
@@ -236,10 +302,12 @@ export async function loadFinance<T>(
             fresh.progress = p;
         })
             .then(({ data, sourceRows }) => {
-                const snap: FinanceSnapshot<T> = { data, sourceRows, fetchedAt: Date.now(), origin: 'wb' };
-                if (closed) {
+                const final = closed && complete(data);
+                const snap: FinanceSnapshot<T> = { data, sourceRows, fetchedAt: Date.now(), origin: 'wb', final };
+                memoryCache.delete(key);
+                if (final) {
                     try {
-                        const payload = deflateSync(Buffer.from(JSON.stringify(data), 'utf8'));
+                        const payload = deflateSync(Buffer.from(JSON.stringify({ v: CACHE_FORMAT, data }), 'utf8'));
                         writeCache.run(cabinet.slug, kind, from, to, snap.fetchedAt, sourceRows, payload);
                         logger.info({ cabinet: cabinet.slug, kind, from, to, sourceRows, bytes: payload.length }, 'wb_fin_cache: период сохранён');
                         return snap as FinanceSnapshot<unknown>;
@@ -267,7 +335,7 @@ export async function loadFinance<T>(
 
     let timer: NodeJS.Timeout | undefined;
     const waited = new Promise<'wait'>(resolve => {
-        timer = setTimeout(() => resolve('wait'), waitMs);
+        timer = setTimeout(() => resolve('wait'), opts.waitMs);
     });
     try {
         const result = await Promise.race([job.promise, waited]);
@@ -612,11 +680,22 @@ export function realizationClosed(to: string): boolean {
     return mskToday() > addDays(weekEnd, 7);
 }
 
+/**
+ * Недели периода, по которым нет ни одного отчёта. У живого кабинета отчёт
+ * есть каждую неделю, так что пустая неделя — почти всегда отчёт, который WB
+ * ещё не сформировал или переформировывает. Такой период закрытым не считаем.
+ */
+export function missingWeeks(reports: Array<Pick<RealizationReport, 'dateFrom' | 'dateTo'>>, from: string, to: string): string[] {
+    return weeksOf(from, to)
+        .filter(([monday, sunday]) => !reports.some(r => r.dateFrom <= sunday && r.dateTo >= monday))
+        .map(([monday, sunday]) => `${monday} — ${sunday}`);
+}
+
 export async function loadRealization(
     cabinet: Cabinet,
     from: string,
     to: string,
-    waitMs: number
+    opts: LoadOptions
 ): Promise<FinanceSnapshot<RealizationData>> {
     const snap = await loadFinance<PackedRealization>(
         'realization',
@@ -625,7 +704,8 @@ export async function loadRealization(
         to,
         realizationClosed(to),
         report => fetchRealization(cabinet, from, to, report),
-        waitMs
+        opts,
+        data => missingWeeks(data.reports, from, to).length === 0
     );
     return { ...snap, data: unpackRealization(snap.data) };
 }
@@ -739,6 +819,8 @@ export type StorageEntry = [string, number, string, number, number];
 
 export interface StorageData {
     entries: StorageEntry[];
+    /** Окна, по которым WB не прислал ни строки, — «2026-08-03 — 2026-08-10». */
+    emptyWindows: string[];
 }
 
 async function storageTask(cabinet: Cabinet, from: string, to: string): Promise<string> {
@@ -776,6 +858,7 @@ async function fetchPaidStorage(
 ): Promise<{ data: StorageData; sourceRows: number }> {
     const parts = windows(from, to, STORAGE_WINDOW_DAYS);
     const total = new Map<string, StorageEntry>();
+    const emptyWindows: string[] = [];
     let sourceRows = 0;
 
     for (const [i, [a, b]] of parts.entries()) {
@@ -814,6 +897,7 @@ async function fetchPaidStorage(
                 continue;
             }
             sourceRows += rows;
+            if (rows === 0) emptyWindows.push(`${a} — ${b}`);
             for (const [key, entry] of part) {
                 // Окна не пересекаются, но строки дня попадают в окно по своей дате —
                 // на всякий случай складываем, а не перезаписываем.
@@ -833,7 +917,7 @@ async function fetchPaidStorage(
         .filter(e => e[0] >= from && e[0] <= to)
         .map(e => [e[0], e[1], e[2], round6(e[3]), e[4]] as StorageEntry)
         .sort((x, y) => x[0].localeCompare(y[0]) || x[1] - y[1]);
-    return { data: { entries }, sourceRows };
+    return { data: { entries, emptyWindows }, sourceRows };
 }
 
 /** Хранение за день WB досчитывает на следующие сутки; два дня запаса. */
@@ -843,7 +927,7 @@ export async function loadPaidStorage(
     cabinet: Cabinet,
     from: string,
     to: string,
-    waitMs: number
+    opts: LoadOptions
 ): Promise<FinanceSnapshot<StorageData>> {
     return loadFinance<StorageData>(
         'storage',
@@ -852,7 +936,10 @@ export async function loadPaidStorage(
         to,
         storageClosed(to),
         report => fetchPaidStorage(cabinet, from, to, report),
-        waitMs
+        opts,
+        // Пустое окно у кабинета с товаром на складах — скорее недосчитанный
+        // WB отчёт, чем правда; навсегда такое не запоминаем.
+        data => data.emptyWindows.length === 0
     );
 }
 
@@ -913,15 +1000,22 @@ async function fetchAdSpend(
     to: string,
     report: (progress: string) => void
 ): Promise<{ data: AdSpendData; sourceRows: number }> {
-    const rows: UpdRow[] = [];
-    const parts = windows(addDays(from, -1), addDays(to, 1), UPD_WINDOW_DAYS);
+    // Соседние окна заходят друг на друга на сутки: как бы WB ни резал стык
+    // (по UTC, по МСК, включительно или нет), списание на стыке придёт хотя бы
+    // в одном окне. Повтор из обоих окон убираем по ключу списания. Номер
+    // документа updNum сам по себе не уникален — один документ на неделю и все
+    // кампании, а у кэшбэка он 0, — поэтому ключ — документ, кампания, момент,
+    // источник и сумма: два списания, совпавшие во всём этом, — одно и то же.
+    const byKey = new Map<string, UpdRow>();
+    const parts = windows(addDays(from, -1), addDays(to, 1), UPD_WINDOW_DAYS, 1);
     for (const [i, [a, b]] of parts.entries()) {
         report(`история затрат: окно ${i + 1} из ${parts.length}`);
         const part = await wbJson<UpdRow[] | null>(cabinet, 'promotion', { path: '/adv/v1/upd', query: { from: a, to: b } });
-        // Окна не пересекаются по датам UTC; строку за чужим окном не берём, чтобы
-        // она не попала в итог дважды, если WB когда-нибудь станет резать иначе.
-        if (Array.isArray(part)) rows.push(...part.filter(r => utcDateOf(r.updTime) >= a && utcDateOf(r.updTime) <= b));
+        for (const r of Array.isArray(part) ? part : []) {
+            byKey.set(`${r.updNum}\u0001${r.advertId}\u0001${r.updTime}\u0001${r.paymentType}\u0001${r.updSum}`, r);
+        }
     }
+    const rows = [...byKey.values()];
 
     const picked = rows.filter(r => {
         const d = mskDateOf(r.updTime);
@@ -964,7 +1058,7 @@ export async function loadAdSpend(
     cabinet: Cabinet,
     from: string,
     to: string,
-    waitMs: number
+    opts: LoadOptions
 ): Promise<FinanceSnapshot<AdSpendData>> {
     return loadFinance<AdSpendData>(
         'ads',
@@ -973,6 +1067,6 @@ export async function loadAdSpend(
         to,
         adSpendClosed(to),
         report => fetchAdSpend(cabinet, from, to, report),
-        waitMs
+        opts
     );
 }
