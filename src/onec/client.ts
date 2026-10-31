@@ -667,7 +667,7 @@ export interface OnecStockValueRow {
 }
 
 /** День после указанного, ГГГГ-ММ-ДД. */
-const nextDay = (d: string): string => new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+export const nextDay = (d: string): string => new Date(Date.parse(`${d}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
 
 /**
  * Денежная оценка запасов из регистра «Запасы».

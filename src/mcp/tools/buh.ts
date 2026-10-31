@@ -17,7 +17,7 @@ import { z } from 'zod';
 import type { Actor } from '../../auth/provider.js';
 import { inArea } from '../../auth/provider.js';
 import { config } from '../../config.js';
-import { listEntity, listEntitySets, type OnecConfig, type OnecEntity } from '../../onec/client.js';
+import { listEntity, listEntitySets, nextDay, type OnecConfig, type OnecEntity } from '../../onec/client.js';
 import { actorOf, amount, fail, guarded, pageOf, text } from './common.js';
 
 const dash = '—';
@@ -353,7 +353,10 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
             const rows: Row[] = [];
             let capped = false;
             const CAP = 20_000;
-            const virt = `${reg}/Balance(Period=datetime'${date}T23:59:59')`;
+            // Остаток на конец дня — это остаток на начало следующего: на моменте
+            // 23:59:59 1С не учитывает документы с этим же временем, а закрытие
+            // месяца и регламентные операции датируются как раз им.
+            const virt = `${reg}/Balance(Period=datetime'${nextDay(date)}T00:00:00')`;
             for (let i = 0; i < accounts.length; i += 15) {
                 const accF = accounts.slice(i, i + 15).map(a => `Account_Key eq guid'${a.Ref_Key}'`).join(' or ');
                 const orgF = orgKeys ? ` and (${orgKeys.map(k => `Организация_Key eq guid'${k}'`).join(' or ')})` : '';
