@@ -108,7 +108,12 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     buh_entities: 'buh',
     buh_read: 'buh',
     buh_balance: 'buh',
-    buh_bank: 'buh'
+    buh_bank: 'buh',
+
+    // Снимки на дату — для баланса «3 Формы»: та же аудитория, что у финансов площадок.
+    wb_stock_snapshot: 'money',
+    wb_balance_snapshot: 'money',
+    ozon_stock_snapshot: 'money'
 };
 
 type Handler = (args: never, extra: never) => Promise<unknown>;

@@ -418,7 +418,7 @@ export interface RemainsRow {
 async function createRemainsTask(cabinet: Cabinet): Promise<string> {
     const res = await wbDataJson<{ taskId: string }>(cabinet, 'analytics', {
         path: '/api/v1/warehouse_remains',
-        query: { groupByNm: true, groupBySize: true }
+        query: { groupByNm: true, groupBySa: true, groupBySize: true }
     });
     if (!res?.taskId) throw new Error('WB не вернул идентификатор задачи для отчёта об остатках');
     return res.taskId;

@@ -57,7 +57,7 @@ function matchOzon(allowed: OzonCabinet[], slug: string): OzonCabinet | undefine
     return undefined;
 }
 
-function resolve(actor: Actor, slug?: string): OzonCabinet[] {
+export function resolve(actor: Actor, slug?: string): OzonCabinet[] {
     const allowed = allowedOzon(actor);
     if (allowed.length === 0) {
         throw new CabinetError('Кабинеты Ozon вам не открыты. Обратитесь к администратору.');

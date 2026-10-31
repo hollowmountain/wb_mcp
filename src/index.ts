@@ -20,6 +20,7 @@ import { saveUpload, UploadError } from './media/uploads.js';
 import { pruneUploads } from './media/uploads.js';
 import { emailFromLink, linkErrorText } from './media/uploadlink.js';
 import { panelRouter } from './panel/routes.js';
+import { startSnapshots } from './snapshots.js';
 import { completePanelLogin, purposeOfPending } from './panel/session.js';
 import { wbPing } from './wb/client.js';
 
@@ -208,6 +209,9 @@ setInterval(() => pruneMedia(), 24 * 60 * 60 * 1000).unref();
 // означало бы, что файл лежит на диске ещё сутки после того, как протух.
 pruneUploads();
 setInterval(() => pruneUploads(), 10 * 60 * 1000).unref();
+
+// Остатки и баланс на 1-е число площадки задним числом не отдают — снимаем сами.
+startSnapshots();
 
 /** Страница загрузки: одна кнопка, одна подпись, никакого входа. */
 function uploadPage(token: string | null, error: string | null): string {

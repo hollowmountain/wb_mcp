@@ -8,6 +8,7 @@ import { registerOnecTools } from './tools/onec.js';
 import { registerBuhTools } from './tools/buh.js';
 import { registerOzonTools } from './tools/ozon.js';
 import { registerReadTools } from './tools/read.js';
+import { registerSnapshotTools } from './tools/snapshots.js';
 import { registerWhoAmI, registerWriteTools } from './tools/write.js';
 
 const INSTRUCTIONS = `Этот сервер даёт доступ к общению с покупателями в личном кабинете Wildberries: отзывы, вопросы и чаты, а также к справочным данным по товарам и возвратам.
@@ -263,6 +264,7 @@ export function createMcpServer(actor: Actor): McpServer {
     registerBuhTools(server, actor);
     registerOzonTools(server, actor);
     registerMediaTools(server, actor);
+    registerSnapshotTools(server, actor);
 
     return server;
 }
