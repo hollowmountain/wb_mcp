@@ -601,34 +601,35 @@ export interface OnecStockRow {
     quantity: number;
 }
 
-/** Остатки на складах на текущий момент, только ненулевые. */
-export async function getOnecStock(cfg: OnecConfig): Promise<OnecStockRow[]> {
+/**
+ * Сколько строк остатков берём одним запросом.
+ *
+ * Листать таблицу остатков страницами нельзя. Сортировка по номенклатуре —
+ * не полный порядок: у товара строк много (склады, счета, характеристики),
+ * и внутри одинакового ключа 1С между запросами порядок не держит — на стыке
+ * страниц строки задваиваются или пропадают, и итог молча врёт. Полный
+ * порядок по всем измерениям — это длинный $orderby по виртуальной таблице:
+ * медленно (в бухгалтерии 49 с на страницу) и упирается в длину адреса.
+ * Поэтому один запрос без сортировки с большим $top, как в buh_balance:
+ * строк сейчас около двух с половиной тысяч. Упёрлись в предел — говорим
+ * об этом прямо, а не выдаём часть за всё.
+ */
+export const BALANCE_CAP = 20_000;
+
+/** Остатки на складах на текущий момент, только ненулевые. capped — упёрлись в BALANCE_CAP. */
+export async function getOnecStock(cfg: OnecConfig): Promise<{ rows: OnecStockRow[]; capped: boolean }> {
     // Фильтровать по мере регистра нельзя: 1С отвечает «Операция не разрешена
     // в предложении ГДЕ». Поэтому забираем всё и отсеиваем нули у себя.
-    //
-    // Забираем именно постранично и с сортировкой. Одной страницы сегодня
-    // хватало — строк 846 при пределе в 1000, — но это случайность: вырастет
-    // склад, и остаток молча покажется неполным. А без сортировки страницы
-    // перекрываются, на чём здесь уже обжигались.
-    const PAGE_SIZE = 1000;
-    const pages: Array<{
+    const pages = await listEntity<{
         Номенклатура_Key: string;
         СтруктурнаяЕдиница_Key: string;
         КоличествоBalance: number;
-    }> = [];
-    for (let skip = 0; skip < 40_000; skip += PAGE_SIZE) {
-        const rows = await listEntity<{
-            Номенклатура_Key: string;
-            СтруктурнаяЕдиница_Key: string;
-            КоличествоBalance: number;
-        }>(cfg, 'AccumulationRegister_ЗапасыНаСкладах/Balance', {
-            top: PAGE_SIZE,
-            skip,
-            orderby: 'Номенклатура_Key'
-        });
-        pages.push(...rows);
-        if (rows.length < PAGE_SIZE) break;
-    }
+    }>(cfg, 'AccumulationRegister_ЗапасыНаСкладах/Balance', {
+        top: BALANCE_CAP,
+        max: BALANCE_CAP,
+        select: 'Номенклатура_Key,СтруктурнаяЕдиница_Key,КоличествоBalance'
+    });
+    const capped = pages.length >= BALANCE_CAP;
     const raw = pages.filter(r => (r.КоличествоBalance ?? 0) > 0);
 
     const [products, warehouses] = await Promise.all([
@@ -636,13 +637,14 @@ export async function getOnecStock(cfg: OnecConfig): Promise<OnecStockRow[]> {
         resolveNames(cfg, 'Catalog_СтруктурныеЕдиницы', raw.map(r => r.СтруктурнаяЕдиница_Key))
     ]);
 
-    return raw.map(r => ({
+    const rows = raw.map(r => ({
         productKey: r.Номенклатура_Key,
         product: products.get(r.Номенклатура_Key) ?? '(без названия)',
         warehouseKey: r.СтруктурнаяЕдиница_Key,
         warehouse: warehouses.get(r.СтруктурнаяЕдиница_Key) ?? '(склад не указан)',
         quantity: r.КоличествоBalance
     }));
+    return { rows, capped };
 }
 
 
@@ -688,26 +690,21 @@ export const nextDay = (d: string): string => new Date(Date.parse(`${d}T00:00:00
  * момент, а закрытие месяца и многие документы в этой базе датированы
  * 23:59:59 — с границей «день 23:59:59» они бы выпали.
  */
-export async function getOnecStockValue(cfg: OnecConfig, date?: string): Promise<OnecStockValueRow[]> {
-    const PAGE_SIZE = 1000;
+export async function getOnecStockValue(cfg: OnecConfig, date?: string): Promise<{ rows: OnecStockValueRow[]; capped: boolean }> {
     const entity = date
         ? `AccumulationRegister_Запасы/Balance(Period=datetime'${nextDay(date)}T00:00:00')`
         : 'AccumulationRegister_Запасы/Balance';
-    const raw: Array<Record<string, unknown>> = [];
-    for (let skip = 0; skip < 40_000; skip += PAGE_SIZE) {
-        const rows = await listEntity<Record<string, unknown>>(cfg, entity, {
-            top: PAGE_SIZE,
-            skip,
-            orderby: 'Номенклатура_Key',
-            // Только нужные поля: строка регистра целиком втрое тяжелее,
-            // а строк за две с половиной тысячи.
-            select:
-                'Номенклатура_Key,СтруктурнаяЕдиница,СтруктурнаяЕдиница_Type,СчетУчета_Key,' +
-                'КоличествоBalance,СуммаBalance,СуммаБезНДСBalance'
-        });
-        raw.push(...rows);
-        if (rows.length < PAGE_SIZE) break;
-    }
+    // Одним запросом, без сортировки — почему не страницами, см. BALANCE_CAP.
+    const raw = await listEntity<Record<string, unknown>>(cfg, entity, {
+        top: BALANCE_CAP,
+        max: BALANCE_CAP,
+        // Только нужные поля: строка регистра целиком втрое тяжелее,
+        // а строк за две с половиной тысячи.
+        select:
+            'Номенклатура_Key,СтруктурнаяЕдиница,СтруктурнаяЕдиница_Type,СчетУчета_Key,' +
+            'КоличествоBalance,СуммаBalance,СуммаБезНДСBalance'
+    });
+    const capped = raw.length >= BALANCE_CAP;
 
     const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
     const partnerOf = (v: unknown): boolean => String(v ?? '').endsWith('Catalog_Контрагенты');
@@ -727,7 +724,7 @@ export async function getOnecStockValue(cfg: OnecConfig, date?: string): Promise
         resolveNames(cfg, 'ChartOfAccounts_Управленческий', raw.map(r => String(r.СчетУчета_Key ?? '')), 'Code')
     ]);
 
-    return raw.map(r => {
+    const rows = raw.map(r => {
         const atPartner = partnerOf(r.СтруктурнаяЕдиница_Type);
         const placeKey = String(r.СтруктурнаяЕдиница ?? '');
         const account = accounts.get(String(r.СчетУчета_Key ?? '')) ?? '';
@@ -746,6 +743,7 @@ export async function getOnecStockValue(cfg: OnecConfig, date?: string): Promise
             sumNoVat: num(r.СуммаБезНДСBalance)
         };
     });
+    return { rows, capped };
 }
 
 

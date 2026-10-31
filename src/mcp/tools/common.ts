@@ -44,6 +44,19 @@ export const text = (value: string): ToolResult => ({ content: [{ type: 'text', 
  */
 export const REPLY_BYTES = 30_000;
 
+/**
+ * Настоящий ли это день календаря. Регулярка ГГГГ-ММ-ДД пропускает
+ * «2026-04-31», а Date молча превращает его в 1 мая — и человек получил бы
+ * остаток не на тот день, не узнав об этом.
+ */
+export const isDay = (s: string): boolean => {
+    const t = Date.parse(`${s}T00:00:00Z`);
+    return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === s;
+};
+
+/** Отказ на несуществующую дату — одним текстом для всех инструментов. */
+export const badDay = (s: string): string => `Дата «${s}» не похожа на день календаря. Формат ГГГГ-ММ-ДД.`;
+
 /** Сумма для таблицы: «1 234,50», с копейками, без знака рубля. */
 export const amount = (v: number): string =>
     v.toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 });

@@ -18,7 +18,7 @@ import type { Actor } from '../../auth/provider.js';
 import { inArea } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { listEntity, listEntitySets, nextDay, type OnecConfig, type OnecEntity } from '../../onec/client.js';
-import { actorOf, amount, fail, guarded, pageOf, text } from './common.js';
+import { actorOf, amount, badDay, explainError, fail, guarded, isDay, pageOf, text } from './common.js';
 
 const dash = '—';
 const q = (s: string): string => `'${s.replace(/'/g, "''")}'`;
@@ -67,19 +67,32 @@ async function readerFor(b: Base, actor: Actor): Promise<OnecConfig> {
 
 const head = (b: Base): string => `База: ${b.label} (${b.key})`;
 
-/** Названия по ссылкам. GUID-ов в одном запросе — не больше 20: длинную строку режет IIS (404.15). */
-async function namesOf(cfg: OnecConfig, entity: string, keys: string[]): Promise<Map<string, string>> {
+/**
+ * Названия по ссылкам. GUID-ов в одном запросе — не больше 20: длинную строку режет IIS (404.15).
+ *
+ * Неопубликованный справочник (или про людей без payroll) — не ошибка: allow
+ * его не пускает, и вызывающий подписывает такие ссылки «название скрыто».
+ * А вот сбой при чтении опубликованного глотать нельзя: позиции молча
+ * остались бы без названий или слиплись в одну строку. Причину кладём в
+ * problems — вызывающий обязан написать её в ответе.
+ */
+async function namesOf(cfg: OnecConfig, entity: string, keys: string[], problems: string[]): Promise<Map<string, string>> {
     const out = new Map<string, string>();
     const uniq = [...new Set(keys.filter(k => GUID.test(k) && k !== EMPTY))];
     if (!cfg.allow?.(entity)) return out;
     for (let i = 0; i < uniq.length; i += 20) {
         const part = uniq.slice(i, i + 20);
-        const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity as OnecEntity, {
-            top: part.length,
-            filter: part.map(k => `Ref_Key eq guid'${k}'`).join(' or '),
-            select: 'Ref_Key,Description'
-        }).catch(() => []);
-        for (const r of rows) out.set(r.Ref_Key, r.Description ?? dash);
+        try {
+            const rows = await listEntity<{ Ref_Key: string; Description?: string }>(cfg, entity as OnecEntity, {
+                top: part.length,
+                filter: part.map(k => `Ref_Key eq guid'${k}'`).join(' or '),
+                select: 'Ref_Key,Description'
+            });
+            for (const r of rows) out.set(r.Ref_Key, r.Description ?? dash);
+        } catch (e) {
+            problems.push(`справочник «${entity}» не загрузился: ${explainError(e)}`);
+            break;
+        }
     }
     return out;
 }
@@ -147,7 +160,14 @@ async function bankDocs(cfg: OnecConfig, b: Base, entity: string, filter: string
  * Справочники меняются редко, поэтому десять минут помним, что уже спросили.
  */
 const cardCache = new Map<string, { at: number; cards: Map<string, { name: string; inn: string }> }>();
-async function cardsOf(cfg: OnecConfig, b: Base, entity: string, keys: string[]): Promise<Map<string, { name: string; inn: string }>> {
+async function cardsOf(
+    cfg: OnecConfig,
+    b: Base,
+    entity: string,
+    keys: string[],
+    /** Сюда — причина, если опубликованный справочник не прочитался (см. namesOf). */
+    problems: string[]
+): Promise<Map<string, { name: string; inn: string }>> {
     const out = new Map<string, { name: string; inn: string }>();
     if (!cfg.allow?.(entity)) return out;
     const ck = `${b.key}|${entity}`;
@@ -160,12 +180,17 @@ async function cardsOf(cfg: OnecConfig, b: Base, entity: string, keys: string[])
     // GUID-ов в одном запросе — не больше 20: длинную строку режет IIS (404.15).
     for (let i = 0; i < missing.length; i += 20) {
         const part = missing.slice(i, i + 20);
-        const rows = await listEntity<{ Ref_Key: string; Description?: string; ИНН?: string }>(cfg, entity as OnecEntity, {
-            top: part.length,
-            filter: part.map(k => `Ref_Key eq guid'${k}'`).join(' or '),
-            select: withInn ? 'Ref_Key,Description,ИНН' : 'Ref_Key,Description'
-        }).catch(() => []);
-        for (const r of rows) known.set(r.Ref_Key, { name: (r.Description ?? dash).trim(), inn: (r.ИНН ?? '').trim() });
+        try {
+            const rows = await listEntity<{ Ref_Key: string; Description?: string; ИНН?: string }>(cfg, entity as OnecEntity, {
+                top: part.length,
+                filter: part.map(k => `Ref_Key eq guid'${k}'`).join(' or '),
+                select: withInn ? 'Ref_Key,Description,ИНН' : 'Ref_Key,Description'
+            });
+            for (const r of rows) known.set(r.Ref_Key, { name: (r.Description ?? dash).trim(), inn: (r.ИНН ?? '').trim() });
+        } catch (e) {
+            problems.push(`справочник «${entity}» не загрузился: ${explainError(e)}`);
+            break;
+        }
     }
     for (const k of uniq) {
         const v = known.get(k);
@@ -317,6 +342,7 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('buh_balance', async (args, extra) => {
+            if (args.date && !isDay(args.date)) return fail(badDay(args.date));
             const actor = actorOf(extra);
             const b = baseOf(args.base);
             const cfg = await readerFor(b, actor);
@@ -400,10 +426,12 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
                 const names = new Map<string, string>();
                 const byType = new Map<string, string[]>();
                 for (const [k, v] of top) if (v.type && GUID.test(k)) byType.set(v.type, [...(byType.get(v.type) ?? []), k]);
-                for (const [t, ks] of byType) for (const [k, n] of await namesOf(cfg, t, ks)) names.set(k, n);
+                const problems: string[] = [];
+                for (const [t, ks] of byType) for (const [k, n] of await namesOf(cfg, t, ks, problems)) names.set(k, n);
                 topLines = [
                     '',
                     `Крупнейшие позиции (первая аналитика счёта${byItem.size > top.length ? `, ${top.length} из ${byItem.size}` : ''}):`,
+                    ...problems.map(m => `ВНИМАНИЕ: ${m} — часть позиций показана ссылками без названий.`),
                     ...top.map(([k, v]) => line(names.get(k) ?? (GUID.test(k) ? `${k} (${v.type ?? 'ссылка'})` : k || 'без аналитики'), v))
                 ];
             }
@@ -465,6 +493,7 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
         guarded('buh_bank', async (args, extra) => {
             const actor = actorOf(extra);
             const b = baseOf(args.base);
+            for (const d of [args.from, args.to]) if (!isDay(d)) return fail(badDay(d));
             const cfg = await readerFor(b, actor);
             if (args.from > args.to) return fail('Начало периода позже конца.');
             const orgs = await orgsOf(cfg);
@@ -557,18 +586,32 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
             // (контрагент, физлицо, счёт…). Статьи ДДС — одним справочником.
             const need = new Map<string, string[]>();
             for (const p of visible) if (p.whoType) need.set(p.whoType, [...(need.get(p.whoType) ?? []), p.who]);
+            const problems: string[] = [];
             const cards = new Map<string, { name: string; inn: string }>();
-            for (const [t, ks] of need) for (const [k, v] of await cardsOf(cfg, b, t, ks)) cards.set(k, v);
+            for (const [t, ks] of need) for (const [k, v] of await cardsOf(cfg, b, t, ks, problems)) cards.set(k, v);
             const articles = new Map<string, string>();
-            for (const [k, v] of await cardsOf(cfg, b, 'Catalog_СтатьиДвиженияДенежныхСредств', visible.map(p => p.articleKey))) {
+            for (const [k, v] of await cardsOf(cfg, b, 'Catalog_СтатьиДвиженияДенежныхСредств', visible.map(p => p.articleKey), problems)) {
                 articles.set(k, v.name);
             }
+            // Справочник не прочитался — говорим прямо: названия, ИНН и свод по
+            // контрагентам неполные. Итоги от этого не зависят.
+            for (const m of problems) top.push(`ВНИМАНИЕ: ${m} — названия, ИНН и статьи неполные, разбивка по контрагентам неполная.`);
             const article = (p: Pay): string => articles.get(p.articleKey) || p.op || dash;
             const inn = (p: Pay): string => cards.get(p.who)?.inn || '';
             // Пустая ссылка — платёж без контрагента: комиссия банка, налог, перевод
             // между своими счетами, покупка по карте (в назначении — магазин).
+            // Справочник открыт, а названия нет (не прочитался или ссылка битая) —
+            // это не «скрыто»: такие ссылки не склеиваем, каждая остаётся своей строкой.
+            const readable = (t?: string | null): boolean => Boolean(t && cfg.allow!(t));
             const nm = (k: string, t?: string | null): string =>
-                !k || k === EMPTY ? 'без контрагента (банк, налоги, свои счета)' : (cards.get(k)?.name ?? (t ? `${t.replace(/^Catalog_/, '')} (название скрыто или не опубликовано)` : k));
+                !k || k === EMPTY
+                    ? 'без контрагента (банк, налоги, свои счета)'
+                    : (cards.get(k)?.name ??
+                      (t
+                          ? readable(t)
+                              ? `${t.replace(/^Catalog_/, '')} ${k} (название не найдено)`
+                              : `${t.replace(/^Catalog_/, '')} (название скрыто или не опубликовано)`
+                          : k));
             const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
             const multiOrg = new Set(pays.map(p => p.org)).size > 1;
 
@@ -626,7 +669,8 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
                         continue;
                     }
                     const name = nm(p.who, p.whoType);
-                    add(cards.has(p.who) ? p.who : `подпись:${name}`, name, inn(p), p);
+                    // Скрытые имена (справочник не открыт) сливаются по подписи, остальные — по ссылке.
+                    add(cards.has(p.who) || readable(p.whoType) ? p.who : `подпись:${name}`, name, inn(p), p);
                 }
                 const ordered = [...groups.values()].sort((a, c) => c.inSum + c.outSum - (a.inSum + a.outSum));
                 const fixed = [
