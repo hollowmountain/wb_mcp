@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { hasAnyCabinet } from '../access.js';
 import type { Actor } from '../auth/provider.js';
 import { inArea } from '../auth/provider.js';
 import { gateByAreas } from './gate.js';
@@ -8,6 +9,7 @@ import { registerOnecTools } from './tools/onec.js';
 import { registerBuhTools } from './tools/buh.js';
 import { registerOzonTools } from './tools/ozon.js';
 import { registerReadTools } from './tools/read.js';
+import { registerWbFinanceTools } from './tools/wbfinance.js';
 import { registerWhoAmI, registerWriteTools } from './tools/write.js';
 
 const INSTRUCTIONS = `Этот сервер даёт доступ к общению с покупателями в личном кабинете Wildberries: отзывы, вопросы и чаты, а также к справочным данным по товарам и возвратам.
@@ -113,6 +115,19 @@ const NEPSELL_INSTRUCTIONS = `
 Никогда не смешивайте цифры Nepsell и цифры площадки в одном показателе и не
 складывайте их: это разные измерения одного и того же. Всегда говорите человеку,
 откуда взята цифра.`;
+
+/** Финансы WB для отчёта «3 Формы» — тем же, кому открыт money. */
+const WB_FINANCE_INSTRUCTIONS = `
+
+Финансы Wildberries для P&L — только из инструментов площадки, не из Nepsell:
+- wb_realization — отчёты о реализации: выручка, комиссия, логистика, штрафы,
+  удержания, продажи в штуках (формулы финансиста). Период — недели пн–вс:
+  месяц = отчёты, чьи недели в нём, например август 2026 = 2026-08-03 … 2026-08-30.
+- wb_paid_storage — платное хранение по дням, неделям или товарам.
+- wb_ad_spend — списания на рекламу; для месяца — те же недели, что у отчётов.
+Выгрузки у WB долгие. Если инструмент ответил, что данные ещё загружаются, —
+это не ошибка: подождите названное время и повторите тот же вызов. Не
+подставляйте вместо этого цифры из других источников.`;
 
 const ONEC_INSTRUCTIONS = `
 
@@ -245,6 +260,7 @@ export function createMcpServer(actor: Actor): McpServer {
             instructions:
                 INSTRUCTIONS +
                 (nepsell ? NEPSELL_INSTRUCTIONS : '') +
+                (nepsell && hasAnyCabinet(actor) ? WB_FINANCE_INSTRUCTIONS : '') +
                 (onec ? ONEC_INSTRUCTIONS : '') +
                 (buh ? BUH_INSTRUCTIONS : '') +
                 (media ? MEDIA_INSTRUCTIONS : '')
@@ -258,6 +274,7 @@ export function createMcpServer(actor: Actor): McpServer {
     registerWhoAmI(server);
     registerReadTools(server, actor);
     registerWriteTools(server, actor);
+    registerWbFinanceTools(server, actor);
     registerNepsellTools(server, actor);
     registerOnecTools(server, actor);
     registerBuhTools(server, actor);

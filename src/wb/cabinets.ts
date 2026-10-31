@@ -44,7 +44,9 @@ export type BucketKey =
     | 'statistics'
     | 'analytics'
     | 'supplies'
-    | 'finance';
+    | 'finance'
+    | 'finreports'
+    | 'promotion';
 
 /**
  * Параметры вёдер: (ёмкость всплеска, пополнение в секунду).
@@ -74,7 +76,15 @@ const BUCKET_LIMITS: Record<BucketKey, [capacity: number, perSecond: number]> = 
     // прошли без 429, поэтому не душим до одного в минуту, как статистику.
     analytics: [5, 1 / 6],
     supplies: [5, 1],
-    finance: [5, 1]
+    finance: [5, 1],
+    // Детализация отчётов о реализации. Заголовки ответа 31.10.2026:
+    // X-RateLimit-Limit=1, а на втором запросе через 30 с — 429 с
+    // X-RateLimit-Retry=31. Значит, один запрос в минуту на продавца, без
+    // всплеска. Лимит общий со всеми сервисами кабинета, поэтому запас в 5 с.
+    finreports: [1, 1 / 65],
+    // Продвижение: X-RateLimit-Limit=5 на /adv/v1/upd и /api/advert/v2/adverts.
+    // Пополнение по документации — раз в секунду; держим чуть медленнее.
+    promotion: [5, 1 / 1.5]
 };
 
 function makeBuckets(): Record<BucketKey, TokenBucket> {

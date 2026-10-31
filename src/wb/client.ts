@@ -37,7 +37,16 @@ const HOSTS: Record<WbCategory, { prod: string; sandbox: string | null }> = {
     // Поставки FBW: /api/v1/supplies (POST)
     supplies: { prod: 'https://supplies-api.wildberries.ru', sandbox: null },
     // Баланс продавца: /api/v1/account/balance
-    finance: { prod: 'https://finance-api.wildberries.ru', sandbox: null }
+    finance: { prod: 'https://finance-api.wildberries.ru', sandbox: null },
+    // Детализация отчётов о реализации: POST /api/finance/v1/sales-reports/detailed.
+    // Хост тот же, что у баланса, но лимит у метода свой и жёсткий, поэтому
+    // и ведро своё — иначе запрос баланса съедал бы минуту детализации.
+    // Прежний statistics-api /api/v5/supplier/reportDetailByPeriod с 15.07.2026
+    // отвечает 404 «This method is deprecated» — проверено 31.10.2026.
+    finreports: { prod: 'https://finance-api.wildberries.ru', sandbox: null },
+    // Продвижение: история затрат /adv/v1/upd, кампании /api/advert/v2/adverts.
+    // Проверено 31.10.2026, оба ответили 200.
+    promotion: { prod: 'https://advert-api.wildberries.ru', sandbox: null }
 };
 
 /**
@@ -53,7 +62,9 @@ const DATA_AREAS: ReadonlySet<WbCategory> = new Set<WbCategory>([
     'statistics',
     'analytics',
     'supplies',
-    'finance'
+    'finance',
+    'finreports',
+    'promotion'
 ]);
 
 function tokenFor(cabinet: Cabinet, category: WbCategory): string {
@@ -105,6 +116,13 @@ export class WbApiError extends Error {
                         `и его делят все сервисы, подключённые к кабинету. Повторите через ${minutes} мин.`
                     );
                 }
+                if (this.category === 'finreports') {
+                    const minutes = Math.max(1, Math.ceil((this.retryAfterSeconds ?? 60) / 60));
+                    return (
+                        'WB сейчас не отдаёт детализацию отчётов о реализации: лимит — один запрос в минуту ' +
+                        `на продавца, и его делят все сервисы, подключённые к кабинету. Повторите через ${minutes} мин.`
+                    );
+                }
                 return `WB ограничил частоту запросов (429). Повтор возможен через ${this.retryAfterSeconds ?? '?'} с.`;
             default:
                 return `WB вернул ошибку ${this.status} на ${this.path}: ${this.message}`;
@@ -128,6 +146,14 @@ interface RequestOptions {
      * минут, и вызов честно ждал, когда Claude сотрудника уже бросил его.
      */
     impatient?: boolean;
+    /**
+     * Отдать ответ как есть, не читая тело: вызывающий разбирает его потоком.
+     * Нужно детализации отчётов о реализации — страница там до 100 тыс. строк
+     * и сотни мегабайт, держать её целиком строкой в памяти нельзя.
+     */
+    stream?: boolean;
+    /** Сколько ждать ответа целиком, мс. По умолчанию минута. */
+    timeoutMs?: number;
 }
 
 function baseUrl(category: WbCategory): string {
@@ -174,7 +200,7 @@ async function request<T>(opts: RequestOptions): Promise<T> {
                 method: opts.method ?? 'GET',
                 headers,
                 body,
-                signal: AbortSignal.timeout(60_000)
+                signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000)
             });
         } catch (cause) {
             lastError = new WbApiError(
@@ -238,6 +264,7 @@ async function request<T>(opts: RequestOptions): Promise<T> {
             throw new WbApiError(String(detail || res.statusText), res.status, opts.category, opts.path, parsed);
         }
 
+        if (opts.stream) return res as T;
         if (opts.raw) return (await res.arrayBuffer()) as T;
         if (res.status === 204) return undefined as T;
 
@@ -307,6 +334,18 @@ export async function wbDataJson<T>(
     const res = await request<{ data: T } | undefined>({ ...opts, cabinet, category });
     if (res === undefined) return undefined as T;
     return res.data;
+}
+
+/**
+ * Ответ без чтения тела — для больших выгрузок, которые разбираются потоком.
+ * Лимиты, повторы на 429 и 5xx и разбор ошибок — те же, что у wbJson.
+ */
+export async function wbResponse(
+    cabinet: Cabinet,
+    category: WbCategory,
+    opts: Omit<RequestOptions, 'category' | 'cabinet' | 'stream' | 'raw'>
+): Promise<Response> {
+    return request<Response>({ ...opts, cabinet, category, stream: true });
 }
 
 export async function wbChatFile(cabinet: Cabinet, path: string): Promise<ArrayBuffer> {

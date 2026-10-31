@@ -112,6 +112,22 @@ CREATE TABLE IF NOT EXISTS kv (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- Финансы Wildberries за закрытые периоды: детализация отчётов о реализации,
+-- платное хранение, списания на рекламу. Сырые строки не храним — их за месяц
+-- сотня тысяч, а диск сервера тесный. Лежит агрегат по ключу, который нужен
+-- инструментам, в JSON, сжатом deflate. Открытый период сюда не попадает.
+CREATE TABLE IF NOT EXISTS wb_fin_cache (
+  cabinet     TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  date_from   TEXT NOT NULL,
+  date_to     TEXT NOT NULL,
+  fetched_at  INTEGER NOT NULL,
+  -- Сколько строк было в источнике: его показываем в шапке ответа.
+  source_rows INTEGER NOT NULL,
+  payload     BLOB NOT NULL,
+  PRIMARY KEY (cabinet, kind, date_from, date_to)
+);
 `);
 
 /**
