@@ -6,6 +6,7 @@ import { config } from '../../config.js';
 import { inArea } from '../../auth/provider.js';
 import {
     ALLOWED_ENTITIES,
+    BALANCE_CAP,
     OPEN_ENTITIES,
     PERSONAL_ENTITIES,
     isAllowed,
@@ -20,7 +21,7 @@ import {
     type CashFlowRow,
     type OnecEntity
 } from '../../onec/client.js';
-import { actorOf, amount, fail, guarded, pageOf, text } from './common.js';
+import { actorOf, amount, badDay, fail, guarded, isDay, pageOf, text } from './common.js';
 
 const dash = '—';
 
@@ -34,12 +35,6 @@ const day = (v: unknown): string => (typeof v === 'string' && v.length >= 10 ? v
 
 /** Сумма в рублях всегда с копейками — для денежных отчётов: «1 234,50 ₽». */
 const rub = (v: number): string => `${amount(v)} ₽`;
-
-/** Настоящий ли это день календаря: «2026-02-30» Date съест молча и превратит в март. */
-const isDay = (s: string): boolean => {
-    const t = Date.parse(`${s}T00:00:00Z`);
-    return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === s;
-};
 
 /**
  * 1С разграничивается теми же областями, что и площадки: номенклатура — это
@@ -507,7 +502,10 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             const denied = denyUnless(actorOf(extra), 'catalog');
             if (denied) return fail(denied);
 
-            const rows = await getOnecStock(config.onec);
+            const { rows, capped } = await getOnecStock(config.onec);
+            const warn = capped
+                ? `ВНИМАНИЕ: строк остатков ${BALANCE_CAP} и больше — показаны НЕ все остатки, итоги неполные. Сузьте поиск в 1С или попросите администратора поднять предел.\n\n`
+                : '';
             const byProduct = args.search?.trim().toLowerCase();
             const byPlace = args.warehouse?.trim().toLowerCase();
             const wanted = rows.filter(
@@ -515,7 +513,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                     (!byProduct || r.product.toLowerCase().includes(byProduct)) &&
                     (!byPlace || r.warehouse.toLowerCase().includes(byPlace))
             );
-            if (wanted.length === 0) return text('Ненулевых остатков по такому запросу нет.');
+            if (wanted.length === 0) return text(`${warn}Ненулевых остатков по такому запросу нет.`);
 
             // Строка регистра — это остаток товара на одном складе; сводных
             // строк здесь нет, поэтому складывать можно прямо.
@@ -543,7 +541,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             // измерения, и складывать штуки с килограммами и метрами
             // бессмысленно. Итог имеет смысл только внутри одной позиции.
             const shown = list.length < grouped.size ? ` (показаны ${list.length} с наибольшим остатком)` : '';
-            return text(`Позиций с остатком: ${grouped.size}${shown}\n\n${lines.join('\n')}`);
+            return text(`${warn}Позиций с остатком: ${grouped.size}${shown}\n\n${lines.join('\n')}`);
         })
     );
 
@@ -1180,8 +1178,8 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             if (!onecReady() || !inArea(actor, 'money')) {
                 return fail('Область «себестоимость, прибыль, реклама» вам не открыта. Обратитесь к администратору.');
             }
-            if (args.date && !isDay(args.date)) return fail(`Дата «${args.date}» не похожа на день календаря. Формат ГГГГ-ММ-ДД.`);
-            const [rows, finished] = await Promise.all([
+            if (args.date && !isDay(args.date)) return fail(badDay(args.date));
+            const [{ rows, capped }, finished] = await Promise.all([
                 getOnecStockValue(config.onec, args.date),
                 args.finishedOnly ? getFinishedProductKeys(config.onec) : Promise.resolve(null)
             ]);
@@ -1234,6 +1232,7 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             const head = [
                 `ЗАПАСЫ В ДЕНЬГАХ (учётная себестоимость), ${when}`,
                 `База: 1С:УНФ, регистр «Запасы»${finished ? `. Только готовая продукция — категория номенклатуры «${finished.category}»` : ''}`,
+                ...(capped ? [`ВНИМАНИЕ: строк регистра ${BALANCE_CAP} и больше — выгружены НЕ все, итоги ниже неполные.`] : []),
                 '',
                 `Свои склады:     ${rub(o.sum)}   без НДС ${rub(o.noVat)}   позиций ${o.positions}`,
                 `У контрагентов:  ${rub(p.sum)}   без НДС ${rub(p.noVat)}   позиций ${p.positions}`
@@ -1468,15 +1467,42 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             }
             const from = args.dateFrom.slice(0, 10);
             const to = args.dateTo.slice(0, 10);
+            for (const d of [from, to]) if (!isDay(d)) return fail(badDay(d));
             if (from > to) return fail('Начало периода позже конца.');
-            const { rows: all, capped } = await getOnecCashFlow(config.onec, from, to);
+            const { rows: fetched, capped } = await getOnecCashFlow(config.onec, from, to);
 
-            // Выдача зарплаты наличными: получатель стоит в поле «подотчётник».
-            // Кто сколько получил — это область payroll, как и в бухгалтерии;
-            // сумма и сама строка видны, как и раньше, скрыто только имя.
+            // Зарплата: кто сколько получил — это область payroll, как и в
+            // бухгалтерии. Получатель бывает в трёх местах: в поле «подотчётник»
+            // (выдача из кассы), в контрагенте и в назначении платежа («…на счёт
+            // Лысовой Татьяны Евгеньевны, заработная плата за июль»). Без payroll
+            // прячем все три; дата, сумма, касса, вид операции и статья остаются,
+            // поэтому строка и итоги — те же, что раньше.
+            //
+            // Узнаём выплату по виду операции («ЗарплатаСотруднику») или по
+            // статье ДДС («Выплата ЗП административного персонала») — что из них
+            // заполнено, зависит от того, каким документом провели выплату.
+            // Налоги и взносы с зарплаты сюда не относятся: в них нет имён.
             const payroll = inArea(actor, 'payroll');
-            const personOf = (r: CashFlowRow): string =>
-                !r.personKey ? '' : /Зарплат/i.test(r.operation) && !payroll ? 'сотрудник (имя — с областью payroll)' : r.person || 'без имени';
+            const isSalary = (r: CashFlowRow): boolean =>
+                !r.transfer &&
+                (/Зарплат/i.test(r.operation) ||
+                    (/(^|[^А-Яа-яЁё])ЗП([^А-Яа-яЁё]|$)|заработн|зарплат/i.test(r.article) && !/налог|взнос|НДФЛ/i.test(r.article)));
+            const hiddenSalary = new Set<CashFlowRow>();
+            const all = payroll
+                ? fetched
+                : fetched.map(r => {
+                      if (!isSalary(r)) return r;
+                      const masked: CashFlowRow = {
+                          ...r,
+                          partner: '',
+                          partnerInn: '',
+                          person: r.personKey ? 'сотрудник (имя — с областью payroll)' : '',
+                          purpose: 'назначение скрыто — выплата зарплаты, нужна область payroll'
+                      };
+                      hiddenSalary.add(masked);
+                      return masked;
+                  });
+            const personOf = (r: CashFlowRow): string => (!r.personKey ? '' : r.person || 'без имени');
 
             const needle = args.search?.trim().toLowerCase();
             const picked = all.filter(r => {
@@ -1519,6 +1545,12 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
             ];
             if (capped.length > 0) {
                 head.push(`ВНИМАНИЕ: по ${capped.join(', ')} документов больше предела выгрузки — итоги НЕ полные. Возьмите период короче.`);
+            }
+            const hiddenHere = pays.filter(r => hiddenSalary.has(r)).length;
+            if (hiddenHere > 0) {
+                head.push(
+                    `Выплат зарплаты: ${hiddenHere} — получатель и назначение скрыты (нужна область payroll); суммы видны и в итогах учтены.`
+                );
             }
 
             const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -1563,8 +1595,11 @@ export function registerOnecTools(server: McpServer, actor: Actor): void {
                 const groups = new Map<string, { name: string; inn: string; inSum: number; inN: number; outSum: number; outN: number }>();
                 for (const r of pays) {
                     const person = personOf(r);
-                    const key = r.partner ? `к:${r.partner}|${r.partnerInn}` : person ? `п:${person}` : `о:${r.operation}`;
-                    const name = r.partner || (person ? `подотчётник: ${person}` : `без контрагента: ${r.operation || 'операция не указана'}`);
+                    const salary = hiddenSalary.has(r);
+                    const key = salary ? 'зарплата' : r.partner ? `к:${r.partner}|${r.partnerInn}` : person ? `п:${person}` : `о:${r.operation}`;
+                    const name = salary
+                        ? 'выплаты зарплаты (получатели скрыты, нужна область payroll)'
+                        : r.partner || (person ? `подотчётник: ${person}` : `без контрагента: ${r.operation || 'операция не указана'}`);
                     const g = groups.get(key) ?? { name, inn: r.partnerInn, inSum: 0, inN: 0, outSum: 0, outN: 0 };
                     if (r.incoming) {
                         g.inSum += r.sum;
