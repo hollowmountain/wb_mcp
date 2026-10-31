@@ -18,7 +18,7 @@ import type { Actor } from '../../auth/provider.js';
 import { inArea } from '../../auth/provider.js';
 import { config } from '../../config.js';
 import { listEntity, listEntitySets, type OnecConfig, type OnecEntity } from '../../onec/client.js';
-import { actorOf, fail, guarded, text } from './common.js';
+import { actorOf, amount, fail, guarded, pageOf, text } from './common.js';
 
 const dash = '—';
 const q = (s: string): string => `'${s.replace(/'/g, "''")}'`;
@@ -101,6 +101,77 @@ function pickOrgs(orgs: Map<string, string>, find: string | undefined): string[]
     if (!find?.trim()) return null;
     const needle = find.trim().toLowerCase();
     return [...orgs].filter(([, name]) => name.toLowerCase().includes(needle)).map(([k]) => k);
+}
+
+/**
+ * Банковские документы за период, все страницы. Живут десять минут: ради
+ * листания страницы одного месяца должны браться из одного снимка, иначе
+ * новый документ сдвинет offset и строка пропадёт или повторится.
+ * capped — упёрлись в 20 страниц, выгрузка неполная.
+ */
+const BANK_TTL = 10 * 60_000;
+const bankCache = new Map<string, { at: number; rows: Record<string, unknown>[]; capped: boolean }>();
+async function bankDocs(cfg: OnecConfig, b: Base, entity: string, filter: string): Promise<{ rows: Record<string, unknown>[]; capped: boolean }> {
+    const key = `${b.key}|${entity}|${filter}`;
+    const hit = bankCache.get(key);
+    if (hit && Date.now() - hit.at < BANK_TTL) return hit;
+    const rows: Record<string, unknown>[] = [];
+    let capped = false;
+    for (let page = 0; ; page++) {
+        const part = await listEntity<Record<string, unknown>>(cfg, entity as OnecEntity, {
+            top: PAGE,
+            skip: page * PAGE,
+            filter,
+            orderby: 'Date,Ref_Key',
+            select:
+                'Ref_Key,Number,Date,Posted,Организация_Key,ВидОперации,Контрагент,Контрагент_Type,СуммаДокумента,' +
+                'НазначениеПлатежа,СтатьяДвиженияДенежныхСредств_Key'
+        });
+        rows.push(...part);
+        if (part.length < PAGE) break;
+        if (page >= 19) {
+            capped = true;
+            break;
+        }
+    }
+    const value = { at: Date.now(), rows, capped };
+    // Протухшие выгрузки выбрасываем, чтобы память сервера не копила месяцы.
+    for (const [k, v] of bankCache) if (Date.now() - v.at >= BANK_TTL) bankCache.delete(k);
+    bankCache.set(key, value);
+    return value;
+}
+
+/**
+ * Название и ИНН по ссылкам — для контрагентов, физлиц, статей ДДС.
+ * ИНН есть только у контрагентов; у физлица он личный и не нужен.
+ * Справочники меняются редко, поэтому десять минут помним, что уже спросили.
+ */
+const cardCache = new Map<string, { at: number; cards: Map<string, { name: string; inn: string }> }>();
+async function cardsOf(cfg: OnecConfig, b: Base, entity: string, keys: string[]): Promise<Map<string, { name: string; inn: string }>> {
+    const out = new Map<string, { name: string; inn: string }>();
+    if (!cfg.allow?.(entity)) return out;
+    const ck = `${b.key}|${entity}`;
+    const hit = cardCache.get(ck);
+    const known = hit && Date.now() - hit.at < BANK_TTL ? hit.cards : new Map<string, { name: string; inn: string }>();
+    if (known !== hit?.cards) cardCache.set(ck, { at: Date.now(), cards: known });
+    const withInn = entity === 'Catalog_Контрагенты';
+    const uniq = [...new Set(keys.filter(k => GUID.test(k) && k !== EMPTY))];
+    const missing = uniq.filter(k => !known.has(k));
+    // GUID-ов в одном запросе — не больше 20: длинную строку режет IIS (404.15).
+    for (let i = 0; i < missing.length; i += 20) {
+        const part = missing.slice(i, i + 20);
+        const rows = await listEntity<{ Ref_Key: string; Description?: string; ИНН?: string }>(cfg, entity as OnecEntity, {
+            top: part.length,
+            filter: part.map(k => `Ref_Key eq guid'${k}'`).join(' or '),
+            select: withInn ? 'Ref_Key,Description,ИНН' : 'Ref_Key,Description'
+        }).catch(() => []);
+        for (const r of rows) known.set(r.Ref_Key, { name: (r.Description ?? dash).trim(), inn: (r.ИНН ?? '').trim() });
+    }
+    for (const k of uniq) {
+        const v = known.get(k);
+        if (v) out.set(k, v);
+    }
+    return out;
 }
 
 export function registerBuhTools(server: McpServer, _actor: Actor): void {
@@ -360,8 +431,12 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
         {
             title: 'Бухгалтерия: банк за период',
             description:
-                'Поступления и списания по расчётным счетам из бухгалтерской базы юрлица за период: итоги по организациям, ' +
-                'крупнейшие контрагенты и список платежей с назначением. Только чтение.',
+                'Поступления и списания по расчётным счетам из бухгалтерской базы юрлица за период. Только чтение. ' +
+                'Без groupBy — сводка: итоги по организациям, крупнейшие контрагенты и последние платежи с назначением. ' +
+                'groupBy=payment — все платежи периода компактной таблицей по дате: сумма, контрагент, ИНН, статья ДДС, ' +
+                'назначение до 150 знаков. groupBy=counterparty — свод по контрагентам: поступило и списано раздельно, ' +
+                'с числом платежей. Итоги вверху — всегда по всем платежам периода, не по странице. Ответ не больше 30 КБ, ' +
+                'длинное листается через offset; страницы одного периода 10 минут берутся из одной выгрузки.',
             inputSchema: {
                 base: baseArg,
                 from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('С какого дня, ГГГГ-ММ-ДД'),
@@ -369,7 +444,18 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
                 direction: z.enum(['все', 'поступления', 'списания']).optional().describe('По умолчанию все'),
                 organization: z.string().optional().describe('Часть названия организации, если в базе их несколько'),
                 purpose: z.string().optional().describe('Часть назначения платежа, например «Вайлдберриз» или «аренд»'),
-                limit: z.number().int().min(0).max(200).optional().describe('Сколько платежей перечислить, по умолчанию 30 (итоги — по всем)')
+                groupBy: z
+                    .enum(['payment', 'counterparty'])
+                    .optional()
+                    .describe('payment — все платежи таблицей; counterparty — свод по контрагентам. Не указано — сводка.'),
+                offset: z.number().int().min(0).optional().describe('С какой строки — для листания; номер следующей страницы пишется внизу ответа'),
+                limit: z
+                    .number()
+                    .int()
+                    .min(0)
+                    .max(500)
+                    .optional()
+                    .describe('Сколько строк на странице: в сводке по умолчанию 30, в payment и counterparty — 500 (итоги — по всем)')
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -388,7 +474,21 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
             if (args.direction !== 'списания') kinds.push({ entity: 'Document_ПоступлениеНаРасчетныйСчет', sign: 1, label: 'поступление' });
             if (args.direction !== 'поступления') kinds.push({ entity: 'Document_СписаниеСРасчетногоСчета', sign: -1, label: 'списание' });
 
-            type Pay = { date: string; num: string; posted: boolean; org: string; who: string; whoType: string | null; sum: number; sign: 1 | -1; kind: string; purpose: string; op: string };
+            type Pay = {
+                ref: string;
+                date: string;
+                num: string;
+                posted: boolean;
+                org: string;
+                who: string;
+                whoType: string | null;
+                sum: number;
+                sign: 1 | -1;
+                kind: string;
+                purpose: string;
+                op: string;
+                articleKey: string;
+            };
             const pays: Pay[] = [];
             const notes: string[] = [];
             for (const k of kinds) {
@@ -399,43 +499,148 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
                 let filter = `Date ge datetime'${args.from}T00:00:00' and Date le datetime'${args.to}T23:59:59' and DeletionMark eq false`;
                 if (orgKeys) filter += ` and (${orgKeys.map(x => `Организация_Key eq guid'${x}'`).join(' or ')})`;
                 if (args.purpose?.trim()) filter += ` and substringof(${q(args.purpose.trim())}, НазначениеПлатежа)`;
-                for (let page = 0; ; page++) {
-                    const part = await listEntity<Record<string, unknown>>(cfg, k.entity as OnecEntity, {
-                        top: PAGE,
-                        skip: page * PAGE,
-                        filter,
-                        orderby: 'Date,Ref_Key',
-                        select: 'Ref_Key,Number,Date,Posted,Организация_Key,ВидОперации,Контрагент,Контрагент_Type,СуммаДокумента,НазначениеПлатежа'
+                const { rows, capped } = await bankDocs(cfg, b, k.entity, filter);
+                if (capped) notes.push(`ВНИМАНИЕ: ${k.label} — больше ${rows.length} документов, учтены не все. Возьмите период короче.`);
+                for (const r of rows) {
+                    pays.push({
+                        ref: String(r.Ref_Key ?? ''),
+                        date: String(r.Date ?? '').slice(0, 10),
+                        num: String(r.Number ?? '').trim(),
+                        posted: r.Posted === true,
+                        org: orgs.get(String(r.Организация_Key)) ?? dash,
+                        who: String(r.Контрагент ?? ''),
+                        whoType: entityOfType(r.Контрагент_Type),
+                        sum: num(r.СуммаДокумента),
+                        sign: k.sign,
+                        kind: k.label,
+                        purpose: String(r.НазначениеПлатежа ?? '').replace(/\s+/g, ' ').trim(),
+                        op: String(r.ВидОперации ?? ''),
+                        articleKey: String(r.СтатьяДвиженияДенежныхСредств_Key ?? '')
                     });
-                    for (const r of part) {
-                        pays.push({
-                            date: String(r.Date ?? '').slice(0, 10),
-                            num: String(r.Number ?? '').trim(),
-                            posted: r.Posted === true,
-                            org: orgs.get(String(r.Организация_Key)) ?? dash,
-                            who: String(r.Контрагент ?? ''),
-                            whoType: entityOfType(r.Контрагент_Type),
-                            sum: num(r.СуммаДокумента),
-                            sign: k.sign,
-                            kind: k.label,
-                            purpose: String(r.НазначениеПлатежа ?? '').replace(/\s+/g, ' ').trim(),
-                            op: String(r.ВидОперации ?? '')
-                        });
-                    }
-                    if (part.length < PAGE) break;
-                    if (page >= 19) {
-                        notes.push(`ВНИМАНИЕ: ${k.label} — больше ${(page + 1) * PAGE} документов, учтены не все. Возьмите период короче.`);
-                        break;
-                    }
                 }
             }
             // Зарплатные платежи — это доходы конкретных людей: без payroll не показываем строки.
-            const hidden = people ? 0 : pays.filter(p => /Зарплат|Сотрудник|Заработн/i.test(p.op)).length;
-            const visible = people ? pays : pays.filter(p => !/Зарплат|Сотрудник|Заработн/i.test(p.op));
+            const isSalary = (p: Pay): boolean => /Зарплат|Сотрудник|Заработн/i.test(p.op);
+            const hidden = people ? 0 : pays.filter(isSalary).length;
+            const visible = people ? pays : pays.filter(p => !isSalary(p));
             if (hidden) notes.push(`Платежей по зарплате скрыто: ${hidden} (нужна область payroll). В итогах они учтены.`);
+            const unposted = pays.filter(p => !p.posted);
+            if (unposted.length) {
+                notes.push(
+                    `Не проведено: ${unposted.length} на ${rub(unposted.reduce((s, p) => s + p.sum, 0))} — в итогах учтены, в строках помечены.`
+                );
+            }
 
-            const inSum = pays.filter(p => p.sign > 0).reduce((s, p) => s + p.sum, 0);
-            const outSum = pays.filter(p => p.sign < 0).reduce((s, p) => s + p.sum, 0);
+            if (pays.length === 0) return text(`${head(b)}\n${args.from} — ${args.to}: платежей нет.${notes.length ? `\n${notes.join('\n')}` : ''}`);
+
+            const inRows = pays.filter(p => p.sign > 0);
+            const outRows = pays.filter(p => p.sign < 0);
+            const inSum = inRows.reduce((s, p) => s + p.sum, 0);
+            const outSum = outRows.reduce((s, p) => s + p.sum, 0);
+            const filters = [
+                args.direction && args.direction !== 'все' ? `только ${args.direction}` : '',
+                orgKeys ? `организации: ${orgKeys.map(k => orgs.get(k)).join('; ')}` : '',
+                args.purpose?.trim() ? `в назначении «${args.purpose.trim()}»` : ''
+            ].filter(Boolean);
+            const top = [
+                head(b),
+                `Период: ${args.from} — ${args.to}, расчётные счета${filters.length ? ` · отбор: ${filters.join(', ')}` : ''}`,
+                `Платежей: ${pays.length} (поступлений ${inRows.length}, списаний ${outRows.length})`,
+                `Поступило ${rub(inSum)}, списано ${rub(outSum)}, разница ${rub(inSum - outSum)}`,
+                ...notes
+            ];
+
+            // Названия и ИНН — для всех контрагентов в выдаче, по типу ссылки
+            // (контрагент, физлицо, счёт…). Статьи ДДС — одним справочником.
+            const need = new Map<string, string[]>();
+            for (const p of visible) if (p.whoType) need.set(p.whoType, [...(need.get(p.whoType) ?? []), p.who]);
+            const cards = new Map<string, { name: string; inn: string }>();
+            for (const [t, ks] of need) for (const [k, v] of await cardsOf(cfg, b, t, ks)) cards.set(k, v);
+            const articles = new Map<string, string>();
+            for (const [k, v] of await cardsOf(cfg, b, 'Catalog_СтатьиДвиженияДенежныхСредств', visible.map(p => p.articleKey))) {
+                articles.set(k, v.name);
+            }
+            const article = (p: Pay): string => articles.get(p.articleKey) || p.op || dash;
+            const inn = (p: Pay): string => cards.get(p.who)?.inn || '';
+            // Пустая ссылка — платёж без контрагента: комиссия банка, налог, перевод
+            // между своими счетами, покупка по карте (в назначении — магазин).
+            const nm = (k: string, t?: string | null): string =>
+                !k || k === EMPTY ? 'без контрагента (банк, налоги, свои счета)' : (cards.get(k)?.name ?? (t ? `${t.replace(/^Catalog_/, '')} (название скрыто или не опубликовано)` : k));
+            const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+            const multiOrg = new Set(pays.map(p => p.org)).size > 1;
+
+            if (args.groupBy === 'payment') {
+                // Хронологически, поступления раньше списаний, дальше по номеру —
+                // порядок устойчивый, чтобы offset между страницами не плыл.
+                const ordered = [...visible].sort(
+                    (a, c) => a.date.localeCompare(c.date) || c.sign - a.sign || a.num.localeCompare(c.num) || a.ref.localeCompare(c.ref)
+                );
+                const fixed = [
+                    ...top,
+                    '',
+                    `Дата | № документа | Сумма, ₽ (+ поступление, − списание) | Контрагент | ИНН | Статья ДДС | Назначение${multiOrg ? ' | Организация' : ''}`,
+                    ''
+                ].join('\n');
+                const body = ordered.map(p =>
+                    [
+                        p.date,
+                        p.num || dash,
+                        `${p.sign > 0 ? '+' : '−'}${amount(p.sum)}`,
+                        cut(!p.who || p.who === EMPTY ? 'без контрагента' : nm(p.who, p.whoType), 60),
+                        inn(p) || dash,
+                        article(p),
+                        cut(p.purpose, 150) || dash,
+                        ...(multiOrg ? [p.org] : []),
+                        ...(p.posted ? [] : ['НЕ ПРОВЕДЁН'])
+                    ].join(' | ')
+                );
+                const page = pageOf(body, args.offset ?? 0, args.limit ?? 500, fixed);
+                return text([fixed, ...page.lines, page.footer].join('\n'));
+            }
+
+            if (args.groupBy === 'counterparty') {
+                // Без контрагента — комиссии, налоги, покупки по карте: не одной
+                // кучей, а по виду операции. Скрытые имена сливаются по подписи.
+                const groups = new Map<string, { name: string; inn: string; inSum: number; inN: number; outSum: number; outN: number }>();
+                const add = (key: string, name: string, innOf: string, p: Pay): void => {
+                    const g = groups.get(key) ?? { name, inn: innOf, inSum: 0, inN: 0, outSum: 0, outN: 0 };
+                    if (p.sign > 0) {
+                        g.inSum += p.sum;
+                        g.inN += 1;
+                    } else {
+                        g.outSum += p.sum;
+                        g.outN += 1;
+                    }
+                    groups.set(key, g);
+                };
+                for (const p of pays) {
+                    if (!people && isSalary(p)) {
+                        add('зарплата', 'зарплата (строки скрыты, нужна область payroll)', '', p);
+                        continue;
+                    }
+                    if (!p.who || p.who === EMPTY) {
+                        add(`оп:${p.op}`, `без контрагента: ${p.op || 'операция не указана'}`, '', p);
+                        continue;
+                    }
+                    const name = nm(p.who, p.whoType);
+                    add(cards.has(p.who) ? p.who : `подпись:${name}`, name, inn(p), p);
+                }
+                const ordered = [...groups.values()].sort((a, c) => c.inSum + c.outSum - (a.inSum + a.outSum));
+                const fixed = [
+                    ...top,
+                    '',
+                    `Контрагентов и групп: ${ordered.length}`,
+                    'Контрагент | ИНН | Поступило, ₽ / платежей | Списано, ₽ / платежей',
+                    ''
+                ].join('\n');
+                const body = ordered.map(g =>
+                    [cut(g.name, 80), g.inn || dash, `${amount(g.inSum)} / ${g.inN}`, `${amount(g.outSum)} / ${g.outN}`].join(' | ')
+                );
+                const page = pageOf(body, args.offset ?? 0, args.limit ?? 500, fixed);
+                return text([fixed, ...page.lines, page.footer].join('\n'));
+            }
+
+            // Сводка — как было: организации, крупнейшие контрагенты, последние платежи.
             const byOrg = new Map<string, { inn: number; out: number }>();
             for (const p of pays) {
                 const v = byOrg.get(p.org) ?? { inn: 0, out: 0 };
@@ -443,7 +648,6 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
                 else v.out += p.sum;
                 byOrg.set(p.org, v);
             }
-            // Контрагенты: названия по типу ссылки (контрагент, физлицо, счёт…).
             const byWho = new Map<string, { sum: number; n: number; type: string | null }>();
             for (const p of visible) {
                 const v = byWho.get(p.who) ?? { sum: 0, n: 0, type: p.whoType };
@@ -451,42 +655,30 @@ export function registerBuhTools(server: McpServer, _actor: Actor): void {
                 v.n += 1;
                 byWho.set(p.who, v);
             }
-            const limit = args.limit ?? 30;
-            const list = [...visible].sort((a, c) => (a.date < c.date ? 1 : a.date > c.date ? -1 : 0)).slice(0, limit);
             const topWho = [...byWho].sort((a, c) => Math.abs(c[1].sum) - Math.abs(a[1].sum)).slice(0, 10);
-            const need = new Map<string, string[]>();
-            for (const [k, v] of topWho) if (v.type) need.set(v.type, [...(need.get(v.type) ?? []), k]);
-            for (const p of list) if (p.whoType) need.set(p.whoType, [...(need.get(p.whoType) ?? []), p.who]);
-            const names = new Map<string, string>();
-            for (const [t, ks] of need) for (const [k, n] of await namesOf(cfg, t, ks)) names.set(k, n);
-            // Пустая ссылка — платёж без контрагента: комиссия банка, налог, перевод между своими счетами.
-            const nm = (k: string, t?: string | null): string =>
-                !k || k === EMPTY ? 'без контрагента (банк, налоги, свои счета)' : (names.get(k) ?? (t ? `${t.replace(/^Catalog_/, '')} (название скрыто или не опубликовано)` : k));
-
-            if (pays.length === 0) return text(`${head(b)}\n${args.from} — ${args.to}: платежей нет.${notes.length ? `\n${notes.join('\n')}` : ''}`);
-            return text(
-                [
-                    head(b),
-                    `${args.from} — ${args.to}: документов ${pays.length}`,
-                    `Поступило ${rub(inSum)}, списано ${rub(outSum)}, разница ${rub(inSum - outSum)}`,
-                    ...notes,
-                    '',
-                    'По организациям:',
-                    ...[...byOrg].map(([o, v]) => `   ${o}: поступило ${rub(v.inn)}, списано ${rub(v.out)}`),
-                    '',
-                    'Крупнейшие контрагенты (плюс — к нам, минус — от нас):',
-                    ...topWho.map(([k, v]) => `   ${nm(k, v.type)}: ${rub(v.sum)} (${v.n} пл.)`),
-                    '',
-                    limit > 0 ? `Платежи${visible.length > list.length ? ` — последние ${list.length} из ${visible.length}` : ''}:` : '',
-                    ...list.map(
-                        p =>
-                            `   ${p.date} №${p.num} ${p.sign > 0 ? '+' : '−'}${rub(p.sum)} · ${nm(p.who, p.whoType)} · ${p.org}${p.posted ? '' : ' · НЕ ПРОВЕДЁН'}` +
-                            (p.purpose ? `\n      ${p.purpose.slice(0, 140)}` : '')
-                    )
-                ]
-                    .filter(s => s !== '')
-                    .join('\n')
-            );
+            const limit = args.limit ?? 30;
+            const list = [...visible].sort((a, c) => (a.date < c.date ? 1 : a.date > c.date ? -1 : 0));
+            const fixed = [
+                ...top,
+                '',
+                'По организациям:',
+                ...[...byOrg].map(([o, v]) => `   ${o}: поступило ${rub(v.inn)}, списано ${rub(v.out)}`),
+                '',
+                'Крупнейшие контрагенты (плюс — к нам, минус — от нас):',
+                ...topWho.map(([k, v]) => `   ${nm(k, v.type)}${cards.get(k)?.inn ? ` (ИНН ${cards.get(k)!.inn})` : ''}: ${rub(v.sum)} (${v.n} пл.)`),
+                '',
+                'Все платежи таблицей — groupBy=payment, свод по контрагентам — groupBy=counterparty.'
+            ].join('\n');
+            if (limit === 0) return text(fixed);
+            const lines = list.map(p => {
+                const tail = [articles.get(p.articleKey), p.purpose.slice(0, 140)].filter(Boolean).join(' · ');
+                return (
+                    `   ${p.date} №${p.num} ${p.sign > 0 ? '+' : '−'}${rub(p.sum)} · ${nm(p.who, p.whoType)}${inn(p) ? ` (ИНН ${inn(p)})` : ''} · ${p.org}${p.posted ? '' : ' · НЕ ПРОВЕДЁН'}` +
+                    (tail ? `\n      ${tail}` : '')
+                );
+            });
+            const page = pageOf(lines, args.offset ?? 0, limit, fixed);
+            return text([fixed, '', 'Платежи, от последних:', ...page.lines, page.footer].join('\n'));
         })
     );
 }
