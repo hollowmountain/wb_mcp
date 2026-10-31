@@ -244,6 +244,8 @@ function realizationText(
     }
 
     const shownMetrics = METRICS.filter(m => Math.round(total[m] * 100) !== 0);
+    head.push('Итог за период: ' + shownMetrics.map(m => `${m} ${fmtMetric(m, total[m])}`).join(' | '));
+    head.push('Метрики: ' + shownMetrics.map(m => `${m} — ${METRIC_NOTES[m]}`).join('; ') + '.');
 
     if (args.mode === 'raw') {
         // Суммы всех числовых полей по типу документа × обоснованию — для сверок
@@ -272,9 +274,6 @@ function realizationText(
         const headText = head.join('\n') + '\n\n';
         return headText + table(['тип документа · обоснование', 'строк', 'суммы полей'], rows, args.offset, args.limit, budget - bytes(headText));
     }
-
-    head.push('Итог за период: ' + shownMetrics.map(m => `${m} ${fmtMetric(m, total[m])}`).join(' | '));
-    head.push('Метрики: ' + shownMetrics.map(m => `${m} — ${METRIC_NOTES[m]}`).join('; ') + '.');
 
     let columns: string[];
     let rows: string[][];

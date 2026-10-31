@@ -564,7 +564,7 @@ async function fetchRealization(
                     acc.add(row);
                     rrdId = id;
                     got++;
-                    if (got % 5000 === 0) report(`запрос ${requests} к WB, получено строк: ${acc.rows}`);
+                    if (got % 1000 === 0) report(`запрос ${requests} к WB, получено строк: ${acc.rows}`);
                 });
             } catch (e) {
                 if (e instanceof WbApiError) throw e;
