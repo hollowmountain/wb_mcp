@@ -333,6 +333,13 @@ const NOT_SUMMED = new Set([
     'utdUcdNumber',
     'buyerTaxRegistrationReasonCode',
     'assemblyId',
+    // идентификаторы, которые бывают то буквенными, то из одних цифр: srid у
+    // части строк — число, и без этого режим raw сложил его как сумму
+    'srid',
+    'orderUid',
+    'articleSubstitution',
+    'kiz',
+    'uuidPromocode',
     // проценты и коэффициенты
     'dlvPrc',
     'salePercent',
