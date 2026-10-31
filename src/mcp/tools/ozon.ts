@@ -18,7 +18,20 @@ import {
     listOzonReturns,
     type OzonCabinet
 } from '../../ozon/client.js';
-import { ctr, dailyStats, drr, hasPerf, listCampaigns, rollUpByCampaign } from '../../ozon/performance.js';
+import {
+    FORM_LINES,
+    RETURN,
+    SALE,
+    describeType,
+    formLineOf,
+    getAccrualTypes,
+    getOzonAccruals,
+    resolveSkus,
+    type AccrualAggregate,
+    type AccrualType,
+    type FormLine
+} from '../../ozon/accruals.js';
+import { adSpendBySku, ctr, dailyStats, drr, hasPerf, listCampaigns, rollUpByCampaign } from '../../ozon/performance.js';
 import { logger } from '../../logger.js';
 import { CabinetError } from '../../wb/cabinets.js';
 import { actorOf, explainError, guarded, text, type ToolResult } from './common.js';
@@ -174,6 +187,188 @@ const SERVICE_NAMES: Record<string, string> = {
     offsets: 'взаимозачёты',
     ozon_tech_offsets: 'взаимозачёты Ozon Технологии'
 };
+
+// ─── Начисления: отчёт ───────────────────────────────────────────────────────
+
+/** Рубли из копеек, всегда два знака: «−633 448,88». */
+const rubK = (k: number): string =>
+    (k / 100).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).replace('-', '−');
+
+const pcs = (n: number): string => n.toLocaleString('ru-RU');
+
+/** Потолок ответа. Кириллица в UTF-8 — два байта на букву, поэтому меряем байты, а не символы. */
+const MAX_BYTES = 30_000;
+
+/**
+ * Страница строк таблицы в пределах offset/limit и потолка по размеру.
+ * Если потолок наступил раньше limit, говорим, с какого offset продолжать.
+ * Потолок делится между кабинетами: без cabinet ответ идёт по трём сразу.
+ */
+function pageRows(head: string, rows: string[], offset: number, limit: number, tail: string, maxBytes = MAX_BYTES): string {
+    if (rows.length > 0 && offset >= rows.length) {
+        return [head, `Строк после offset=${offset} нет: всего ${rows.length}.`, ...(tail ? ['', tail] : [])].join('\n');
+    }
+    const slice = rows.slice(offset, offset + limit);
+    let used = Buffer.byteLength(head) + Buffer.byteLength(tail) + 300;
+    const shown: string[] = [];
+    for (const r of slice) {
+        const b = Buffer.byteLength(r) + 1;
+        if (used + b > maxBytes) break;
+        used += b;
+        shown.push(r);
+    }
+    const end = offset + shown.length;
+    const more = end < rows.length;
+    const nav =
+        rows.length === 0
+            ? 'Строк нет.'
+            : shown.length === 0
+              ? `Таблица (${rows.length} строк) не помещается в ответ — укажите cabinet или уменьшите limit.`
+            : `Строки ${offset + 1}–${end} из ${rows.length}.` + (more ? ` Следующие: offset=${end}.` : '');
+    return [head, ...shown, nav, ...(tail ? ['', tail] : [])].join('\n');
+}
+
+/** Сводка по статьям «3 Формы» — первым блоком в любом разрезе. */
+function formsBlock(agg: AccrualAggregate): string[] {
+    const by = new Map<FormLine, number>();
+    let sold = 0;
+    let returned = 0;
+    for (const c of agg.cells) {
+        const line = formLineOf(c.key);
+        by.set(line, (by.get(line) ?? 0) + c.kop);
+        if (c.key === SALE) sold += c.qty;
+        if (c.key === RETURN) returned += c.qty;
+    }
+    const s = agg.salesSplit;
+    const out = ['Статьи «3 Формы» (раскладка финансиста, см. описание инструмента):'];
+    for (const line of FORM_LINES) {
+        const v = by.get(line) ?? 0;
+        if (v === 0 && line === 'Компенсации') continue;
+        let extra = '';
+        if (line === 'Выручка') extra = ` · ${pcs(sold - returned)} шт (продано ${pcs(sold)}, возвраты и отмены ${pcs(returned)})`;
+        if (line === 'Компенсации') extra = ' · доход, в «прочие расходы» не входит';
+        out.push(`  ${line.padEnd(15, '.')} ${rubK(v)} ₽${extra}`);
+        if (line === 'Выручка') {
+            out.push(
+                `     из неё заплатили покупатели ${rubK(s.buyerKop)} · баллы Ozon за скидки ${rubK(s.pointsKop)} · партнёрские программы ${rubK(s.partnersKop)}`
+            );
+        }
+    }
+    out.push(`  ${'Итого'.padEnd(15, '.')} ${rubK(agg.totalKop)} ₽`);
+    return out;
+}
+
+/** Порядок видов: продажи, возвраты, вознаграждение, дальше по сумме от крупных удержаний. */
+function typeTotals(agg: AccrualAggregate): Array<{ key: string; kop: number; qty: number; rows: number; noSkuKop: number }> {
+    const by = new Map<string, { key: string; kop: number; qty: number; rows: number; noSkuKop: number }>();
+    for (const c of agg.cells) {
+        const t = by.get(c.key) ?? { key: c.key, kop: 0, qty: 0, rows: 0, noSkuKop: 0 };
+        t.kop += c.kop;
+        t.qty += c.qty;
+        t.rows += c.rows;
+        if (c.sku === 0) t.noSkuKop += c.kop;
+        by.set(c.key, t);
+    }
+    const head = [SALE, RETURN, '69'];
+    return [...by.values()].sort((a, b) => {
+        const ia = head.indexOf(a.key);
+        const ib = head.indexOf(b.key);
+        if (ia >= 0 || ib >= 0) return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+        return a.kop - b.kop;
+    });
+}
+
+const typeLabel = (key: string, types: Map<number, AccrualType>): string => {
+    const t = describeType(key, types);
+    return `${t.name} [${t.code}]`;
+};
+
+function accrualsTypeRows(agg: AccrualAggregate, types: Map<number, AccrualType>): string[] {
+    return typeTotals(agg).map(t => {
+        const noSku = t.noSkuKop === 0 ? '' : t.noSkuKop === t.kop ? ' · без SKU' : ` · из них без SKU ${rubK(t.noSkuKop)}`;
+        const qty = t.qty !== 0 ? ` · ${pcs(t.qty)} шт` : '';
+        return `${formLineOf(t.key)} | ${typeLabel(t.key, types)} | ${rubK(t.kop)}${qty} · строк ${pcs(t.rows)}${noSku}`;
+    });
+}
+
+/** Колонки разреза по SKU — те же статьи, что у финансиста. */
+const SKU_COLUMNS: FormLine[] = ['Выручка', 'Комиссия', 'Эквайринг', 'Логистика'];
+
+function accrualsSkuRows(agg: AccrualAggregate): string[] {
+    const by = new Map<number, { cols: Map<FormLine, number>; other: number; total: number; net: number }>();
+    for (const c of agg.cells) {
+        if (c.sku === 0) continue;
+        const s = by.get(c.sku) ?? { cols: new Map(), other: 0, total: 0, net: 0 };
+        const line = formLineOf(c.key);
+        if (SKU_COLUMNS.includes(line)) s.cols.set(line, (s.cols.get(line) ?? 0) + c.kop);
+        else s.other += c.kop;
+        s.total += c.kop;
+        if (c.key === SALE) s.net += c.qty;
+        if (c.key === RETURN) s.net -= c.qty;
+        by.set(c.sku, s);
+    }
+    return [...by.entries()]
+        .sort((a, b) => (b[1].cols.get('Выручка') ?? 0) - (a[1].cols.get('Выручка') ?? 0) || a[1].total - b[1].total)
+        .map(([sku, s]) => {
+            const info = agg.skus[String(sku)];
+            const cols = SKU_COLUMNS.map(l => rubK(s.cols.get(l) ?? 0)).join(' | ');
+            return `${info?.offerId || '?'} | ${sku} | ${pcs(s.net)} | ${cols} | ${rubK(s.other)} | ${rubK(s.total)}`;
+        });
+}
+
+function accrualsTypeSkuRows(agg: AccrualAggregate, types: Map<number, AccrualType>): string[] {
+    const order = new Map(typeTotals(agg).map((t, i) => [t.key, i]));
+    return [...agg.cells]
+        .sort((a, b) => (order.get(a.key) ?? 0) - (order.get(b.key) ?? 0) || Math.abs(b.kop) - Math.abs(a.kop))
+        .map(c => {
+            const t = describeType(c.key, types);
+            const who = c.sku === 0 ? 'без SKU' : `${agg.skus[String(c.sku)]?.offerId || '?'} | ${c.sku}`;
+            return `${t.code} | ${who} | ${rubK(c.kop)}${c.qty !== 0 ? ` | ${pcs(c.qty)} шт` : ''}`;
+        });
+}
+
+/** Что без SKU — одной строкой по видам: реклама, хранение, обработка поставок. */
+function noSkuLine(agg: AccrualAggregate, types: Map<number, AccrualType>): string {
+    const parts = typeTotals(agg)
+        .filter(t => t.noSkuKop !== 0)
+        .map(t => `${describeType(t.key, types).name} ${rubK(t.noSkuKop)}`);
+    const sum = agg.cells.filter(c => c.sku === 0).reduce((s, c) => s + c.kop, 0);
+    return parts.length === 0 ? 'Начислений без SKU нет.' : `Без SKU (Ozon не раскладывает по товарам): ${rubK(sum)} ₽ — ${parts.join(' · ')}`;
+}
+
+// ─── Реклама по товарам ──────────────────────────────────────────────────────
+
+/** Рубли со знаком минус: расход в разрезе SKU пишем как в начислениях. */
+const spendK = (rub: number): string => rubK(-Math.round(rub * 100));
+
+async function adsBySkuReport(cab: OzonCabinet, from: string, to: string, offset: number, limit: number, maxBytes: number): Promise<string> {
+    const s = await adSpendBySku(cab, from, to);
+    // Артикулы — из Seller API того же кабинета; без них SKU всё равно показана.
+    const skus = await resolveSkus(cab, s.lines.map(l => Number(l.sku))).catch((): AccrualAggregate['skus'] => ({}));
+    const click = s.lines.reduce((a, l) => a + l.click, 0);
+    const order = s.lines.reduce((a, l) => a + l.order, 0);
+    const loose = s.unallocated.reduce((a, u) => a + u.spent, 0);
+    const head = [
+        `━━ ${cab.slug} · ${from} — ${to} · расход по SKU ━━`,
+        `Источник: отчёты рекламного кабинета Ozon (Performance API) — ` +
+            (s.cachedAt ? `из кэша от ${new Date(s.cachedAt * 1000).toISOString().slice(0, 10)}` : `отчётов-заданий ${s.reports}`) +
+            `, товаров ${s.lines.length}`,
+        `Расход кампаний по дневной статистике: ${spendK(s.campaignSpent)} ₽`,
+        `Разложено по SKU: ${spendK(click + order)} ₽ (оплата за клик ${spendK(click)} · оплата за заказ ${spendK(order)}) · не разложено: ${spendK(loose)} ₽`,
+        'Знаки: расход с минусом, как в начислениях ozon_accruals. Суммы в ₽.',
+        '',
+        'артикул | SKU | оплата за клик | оплата за заказ | итого, ₽ | клики | заказы'
+    ].join('\n');
+    const rows = s.lines.map(
+        l =>
+            `${skus[l.sku]?.offerId || '?'} | ${l.sku} | ${spendK(l.click)} | ${spendK(l.order)} | ` +
+            `${spendK(l.click + l.order)} | ${pcs(l.clicks)} | ${pcs(l.orders)}`
+    );
+    const tail = s.unallocated.length
+        ? 'Не разложено по товарам:\n' + s.unallocated.map(u => `  ${u.title}: ${spendK(u.spent)} ₽ — ${u.reason}`).join('\n')
+        : 'Весь расход разложен по товарам.';
+    return pageRows(head, rows, offset, limit, tail, maxBytes);
+}
 
 const MONTHS = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
 const monthLabel = (y: number, m: number): string => `${MONTHS[m - 1]} ${y}`;
@@ -546,6 +741,120 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
     );
 
     server.registerTool(
+        'ozon_accruals',
+        {
+            title: 'Ozon: начисления по видам и товарам',
+            description:
+                'Начисления Ozon детально — для отчёта «3 Формы» и разбора удержаний: сумма ₽ и штуки по КАЖДОМУ ' +
+                'виду начисления и услуги, без свёртки в «прочие». Названия и коды видов — из справочника Ozon ' +
+                '(/v1/finance/accrual/types, например «Логистика [Logistic]»); источник — /v1/finance/accrual/by-day, ' +
+                'который заменил снятый Ozon /v3/finance/transaction/list. Сумма всех видов сверяется с ' +
+                '/v1/finance/balance.\n' +
+                'Знаки: поступления (продажи, возмещения) с плюсом, удержания и расходы с минусом. Выручка — ' +
+                'продажи по цене продавца минус возвраты и отмены; штуки — продано минус возвращено.\n' +
+                'Разрезы groupBy: type — по видам (по умолчанию); sku — по товарам: артикул продавца, SKU, штуки, ' +
+                'выручка, комиссия, эквайринг, логистика, прочее, итого; type_sku — вид × товар. Начисления без ' +
+                'товара (реклама, хранение, обработка поставок — Ozon их по SKU не раскладывает) идут отдельно, ' +
+                'с пометкой «без SKU». Расход рекламы по SKU даёт ozon_ads с groupBy=sku.\n' +
+                'Вверху всегда сводка по статьям «3 Формы» в раскладке финансиста (сверена с его файлом за август ' +
+                '2026): Логистика = Логистика + Доставка до места выдачи + Обратная логистика + Обработка возвратов, ' +
+                'отмен и невыкупов партнёрами; Хранение = Размещение товаров на складах Ozon; Реклама = Оплата за ' +
+                'клик + Продвижение товара (оплата за заказ); Компенсации (возмещения Ozon за потерю и порчу) — ' +
+                'доход, в расходы не входят; Прочие расходы — все остальные виды.\n' +
+                'Даты: любой период до 12 месяцев, склеивается из окон по календарным месяцам; Ozon отдаёт ' +
+                'начисления по дням. Закрытый месяц (прошло 10 дней после конца) берётся из кэша сервера, первый ' +
+                'раз качается до минуты. Длинные таблицы — страницами: offset и limit (до 500).',
+            inputSchema: {
+                cabinet: cabinetArg,
+                dateFrom: dateArg('Начало периода: 2026-08-01'),
+                dateTo: dateArg('Конец периода включительно: 2026-08-31'),
+                groupBy: z
+                    .enum(['type', 'sku', 'type_sku'])
+                    .optional()
+                    .describe('Разрез: type — по видам начислений (по умолчанию), sku — по товарам, type_sku — вид × товар'),
+                offset: z.number().int().min(0).optional().describe('С какой строки таблицы показывать, по умолчанию 0'),
+                limit: z.number().int().min(1).max(500).optional().describe('Сколько строк таблицы, по умолчанию 200, не больше 500'),
+                refresh: z
+                    .boolean()
+                    .optional()
+                    .describe('Скачать заново мимо кэша закрытых месяцев. Нужно редко: если Ozon задним числом дописал начисления.')
+            },
+            annotations: { readOnlyHint: true, openWorldHint: true }
+        },
+        guarded('ozon_accruals', async (args, extra) => {
+            const todayMsk = new Date(Date.now() + 3 * 3_600_000).toISOString().slice(0, 10);
+            const from = args.dateFrom;
+            const to = args.dateTo > todayMsk ? todayMsk : args.dateTo;
+            if (from > to) return text(`Начало периода ${from} позже конца ${to}.`);
+            const days = (Date.parse(to) - Date.parse(from)) / 86_400_000 + 1;
+            if (days > 366) return text('Период длиннее 12 месяцев. Возьмите год или меньше: отчёт «3 Формы» — помесячный.');
+            const groupBy = args.groupBy ?? 'type';
+            const offset = args.offset ?? 0;
+            const limit = args.limit ?? 200;
+            const budget = Math.floor(MAX_BYTES / resolve(actorOf(extra), args.cabinet).length);
+
+            return overCabinetsInTurn(actorOf(extra), args.cabinet, async cabinet => {
+                const [agg, types] = await Promise.all([
+                    getOzonAccruals(cabinet, { from, to, refresh: args.refresh }),
+                    getAccrualTypes(cabinet).catch(() => new Map<number, AccrualType>())
+                ]);
+
+                // Сверка с балансом — отдельный метод Ozon. Не сошлось — говорим прямо.
+                let check: string;
+                try {
+                    const b = await getOzonBalance(cabinet, { from, to });
+                    const diff = Math.round(b.accrued * 100) - agg.totalKop;
+                    check =
+                        diff === 0
+                            ? `сверка с /v1/finance/balance: совпадает до копейки`
+                            : `сверка с /v1/finance/balance: там ${rubK(Math.round(b.accrued * 100))} ₽, расхождение ${rubK(diff)} ₽`;
+                } catch (e) {
+                    check = `сверка с /v1/finance/balance не удалась: ${explainError(e)}`;
+                }
+
+                const cachedNote = agg.cached.length
+                    ? `; из кэша: ${agg.cached.map(c => `${c.month} (скачан ${new Date(c.fetchedAt * 1000).toISOString().slice(0, 10)})`).join(', ')}`
+                    : '';
+                const head = [
+                    `Начисления Ozon · ${cabinet.slug} · ${from} — ${to}${to !== args.dateTo ? ` (конец обрезан по сегодня)` : ''}`,
+                    `Источник: /v1/finance/accrual/by-day — начислений ${pcs(agg.sourceRows)}, запросов к Ozon ${agg.requests}${cachedNote}`,
+                    `Итого начислено: ${rubK(agg.totalKop)} ₽ · ${check}`,
+                    'Знаки: поступления с плюсом, удержания и расходы с минусом. Суммы в ₽.',
+                    ...(agg.unparsedRows > 0
+                        ? [`ВНИМАНИЕ: ${agg.unparsedRows} начислений разобраны не полностью — остаток показан видом «Не разобрано». Нужна правка коннектора.`]
+                        : []),
+                    '',
+                    ...formsBlock(agg),
+                    ''
+                ];
+
+                if (groupBy === 'type') {
+                    const rows = accrualsTypeRows(agg, types);
+                    head.push(
+                        `Виды начислений: ${rows.length} с ненулевой суммой (остальные виды справочника Ozon за период не начислялись).`,
+                        'статья | вид [код Ozon] | сумма, ₽ · штуки · строк источника'
+                    );
+                    return pageRows(head.join('\n'), rows, offset, limit, noSkuLine(agg, types), budget);
+                }
+                if (groupBy === 'sku') {
+                    const rows = accrualsSkuRows(agg);
+                    head.push(
+                        `Товаров с начислениями: ${rows.length}. Штуки — продано минус возвращено. «Прочее» — остальные виды по товару.`,
+                        'артикул | SKU | шт | выручка | комиссия | эквайринг | логистика | прочее | итого, ₽'
+                    );
+                    return pageRows(head.join('\n'), rows, offset, limit, noSkuLine(agg, types), budget);
+                }
+                const rows = accrualsTypeSkuRows(agg, types);
+                head.push(
+                    `Строк «вид × товар»: ${rows.length}. Названия кодов — в разрезе type.`,
+                    'код вида | артикул | SKU | сумма, ₽ | штуки'
+                );
+                return pageRows(head.join('\n'), rows, offset, limit, '', budget);
+            });
+        })
+    );
+
+    server.registerTool(
         'ozon_buyer_prices',
         {
             title: 'Ozon: цена, которую платит покупатель',
@@ -703,12 +1012,30 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
             title: 'Ozon: реклама и окупаемость',
             description:
                 'Рекламные кампании Ozon за период: расход, показы, клики, CTR, заказы и выручка от рекламы, ДРР. ' +
-                'Это отдельный от Seller API рекламный кабинет — в обычной аналитике Ozon все рекламные показатели отключены.',
+                'Это отдельный от Seller API рекламный кабинет — в обычной аналитике Ozon все рекламные показатели отключены.\n' +
+                'groupBy=campaign (по умолчанию) — по кампаниям, расход положительным числом, как в кабинете. ' +
+                'groupBy=sku — расход по товарам: артикул продавца, SKU, оплата за клик и оплата за заказ отдельно; ' +
+                'здесь расход С МИНУСОМ, как в начислениях ozon_accruals, чтобы суммы сверялись напрямую. Разбивка ' +
+                'строится отчётами рекламного кабинета (до минуты на кабинет в первый раз; период — до 62 дней на ' +
+                'отчёт, длиннее склеивается); итог по товарам сверяется с расходом кампаний, и всё, что не разложилось ' +
+                '(баннеры, расхождения), показано отдельной строкой с причиной. Закрытый период (прошло 10 дней) ' +
+                'кэшируется на сервере. Длинный список — offset и limit.',
             inputSchema: {
                 cabinet: z.string().optional().describe('Кабинет Ozon (oz-harbez). Не указан — по всем доступным.'),
                 dateFrom: z.string().describe('Начало периода, ISO-дата: 2026-08-01'),
                 dateTo: z.string().describe('Конец периода, ISO-дата: 2026-08-31'),
-                limit: z.number().int().min(1).max(100).optional().describe('Сколько кампаний показать, по умолчанию 15')
+                groupBy: z
+                    .enum(['campaign', 'sku'])
+                    .optional()
+                    .describe('campaign — по кампаниям (по умолчанию), sku — расход по товарам и инструменту'),
+                offset: z.number().int().min(0).optional().describe('Для groupBy=sku: с какой строки показывать, по умолчанию 0'),
+                limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(500)
+                    .optional()
+                    .describe('Сколько строк: кампаний (по умолчанию 15, не больше 100) или товаров при groupBy=sku (по умолчанию 200, не больше 500)')
             },
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
@@ -723,7 +1050,25 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
             }
 
             const skipped = cabs.filter(c => !hasPerf(c)).map(c => c.slug);
-            const top = args.limit ?? 15;
+            if (args.groupBy === 'sku') {
+                // Кабинеты по очереди: Ozon строит одно задание на отчёт за раз.
+                const out: string[] = [];
+                let failed = 0;
+                for (const cab of withPerf) {
+                    try {
+                        out.push(
+                            await adsBySkuReport(cab, args.dateFrom.slice(0, 10), args.dateTo.slice(0, 10), args.offset ?? 0, args.limit ?? 200, Math.floor(MAX_BYTES / withPerf.length))
+                        );
+                    } catch (e) {
+                        failed++;
+                        logger.warn({ cabinet: cab.slug, err: e instanceof Error ? e.message.slice(0, 300) : String(e) }, 'cabinet failed');
+                        out.push(`━━ ${cab.slug} · расход по SKU ━━\nОшибка: ${explainError(e)}`);
+                    }
+                }
+                if (skipped.length > 0) out.push(`Без рекламных ключей, поэтому не вошли в отчёт: ${skipped.join(', ')}.`);
+                return finish(out, failed === withPerf.length);
+            }
+            const top = Math.min(args.limit ?? 15, 100);
             const blocks: string[] = [];
 
             for (const cab of withPerf) {

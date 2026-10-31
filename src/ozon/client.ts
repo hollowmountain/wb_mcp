@@ -48,7 +48,7 @@ export class OzonApiError extends Error {
     }
 }
 
-async function post<T>(cabinet: OzonCabinet, path: string, body: unknown): Promise<T> {
+export async function post<T>(cabinet: OzonCabinet, path: string, body: unknown): Promise<T> {
     const res = await fetch(BASE + path, {
         method: 'POST',
         headers: {
@@ -250,7 +250,7 @@ export const listOzonChats = (cabinet: OzonCabinet, limit = 30): Promise<{ chats
 /** Живые показатели аналитики. Больше просить нельзя — запрос упадёт целиком. */
 export const OZON_METRICS = ['revenue', 'ordered_units'] as const;
 
-async function retryOn429<T>(run: () => Promise<T>, tries = 3): Promise<T> {
+export async function retryOn429<T>(run: () => Promise<T>, tries = 3): Promise<T> {
     let wait = 2000;
     for (let i = 0; ; i++) {
         try {
@@ -381,7 +381,8 @@ export async function getOzonWarehouseStocks(cabinet: OzonCabinet): Promise<Ozon
  * «404 page not found» на всех трёх кабинетах, и ozon_finance молча не работал.
  * Замена — /v1/finance/balance: продажи, возвраты, услуги, начислено и
  * выплачено, плюс остаток на начало и конец. Период — не длиннее месяца,
- * поэтому длинный разбивается на куски.
+ * поэтому длинный разбивается на куски. Начисления детально, по видам и
+ * товарам, — /v1/finance/accrual/by-day, см. ozon/accruals.ts.
  *
  * Главное, чего у старого метода не было: продажи разложены на то, что
  * заплатили покупатели (revenue), и то, что докрыл Ozon баллами за скидки
