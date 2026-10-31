@@ -43,6 +43,7 @@ export function mondayOf(iso: string): string {
 
 /** Дата по Москве из отметки времени с любым поясом. */
 const mskDateOf = (stamp: string): string => new Date(Date.parse(stamp) + MSK_MS).toISOString().slice(0, 10);
+const utcDateOf = (stamp: string): string => new Date(Date.parse(stamp)).toISOString().slice(0, 10);
 
 export const daysInclusive = (from: string, to: string): number =>
     Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS) + 1;
@@ -917,7 +918,9 @@ async function fetchAdSpend(
     for (const [i, [a, b]] of parts.entries()) {
         report(`история затрат: окно ${i + 1} из ${parts.length}`);
         const part = await wbJson<UpdRow[] | null>(cabinet, 'promotion', { path: '/adv/v1/upd', query: { from: a, to: b } });
-        if (Array.isArray(part)) rows.push(...part);
+        // Окна не пересекаются по датам UTC; строку за чужим окном не берём, чтобы
+        // она не попала в итог дважды, если WB когда-нибудь станет резать иначе.
+        if (Array.isArray(part)) rows.push(...part.filter(r => utcDateOf(r.updTime) >= a && utcDateOf(r.updTime) <= b));
     }
 
     const picked = rows.filter(r => {
