@@ -453,6 +453,13 @@ CREATE TABLE IF NOT EXISTS ozon_ads_sku (
 );
 `);
 
+/**
+ * Версия формата записи кэша. Поменялся разбор или состав AdSkuSummary —
+ * увеличьте: старые записи тогда не читаются, а перекачиваются, и прежняя
+ * раскладка не выдаётся за новую.
+ */
+const ADS_CACHE_FORMAT = 1;
+
 /** Период закрыт, если с его конца прошло 10 дней: как у начислений, Ozon дописывает расход с опозданием. */
 const closedPeriod = (to: string): boolean => Date.now() - Date.parse(`${to}T21:00:00Z`) > 10 * 86_400_000;
 
@@ -469,7 +476,9 @@ export async function adSpendBySku(cabinet: OzonCabinet, dateFrom: string, dateT
             | undefined;
         if (row) {
             try {
-                return { ...(JSON.parse(inflateSync(row.data).toString('utf8')) as AdSkuSummary), reports: 0, cachedAt: row.fetched_at };
+                const rec = JSON.parse(inflateSync(row.data).toString('utf8')) as { v?: number; summary?: AdSkuSummary };
+                // Запись старого формата (или без версии) не читаем — перекачиваем.
+                if (rec.v === ADS_CACHE_FORMAT && rec.summary) return { ...rec.summary, reports: 0, cachedAt: row.fetched_at };
             } catch {
                 /* битая запись — перекачаем */
             }
@@ -551,7 +560,7 @@ export async function adSpendBySku(cabinet: OzonCabinet, dateFrom: string, dateT
         db.prepare(
             'INSERT INTO ozon_ads_sku (cabinet, period, fetched_at, data) VALUES (?, ?, ?, ?) ' +
                 'ON CONFLICT(cabinet, period) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data'
-        ).run(cabinet.slug, period, Math.floor(Date.now() / 1000), deflateSync(Buffer.from(JSON.stringify({ ...summary, reports: 0 })), { level: 9 }));
+        ).run(cabinet.slug, period, Math.floor(Date.now() / 1000), deflateSync(Buffer.from(JSON.stringify({ v: ADS_CACHE_FORMAT, summary: { ...summary, reports: 0 } })), { level: 9 }));
     }
     return summary;
 }
