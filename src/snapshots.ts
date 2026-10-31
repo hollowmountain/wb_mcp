@@ -99,6 +99,9 @@ const mskMinuteOfDay = (at: Date): number => {
 async function captureWbStock(cabinet: Cabinet): Promise<WbStockItem[]> {
     // Ночью WB готовит отчёт дольше, чем днём, — ждём с запасом.
     const rows = await getWarehouseRemains(cabinet, 300_000);
+    // Пустой отчёт — сбой WB, а не пустые склады: записанный ноль задним числом
+    // уже не исправить, поэтому лучше повторить через четверть часа.
+    if (rows.length === 0) throw new Error('WB вернул пустой отчёт об остатках');
     return rows.map(r => {
         const s = splitRemains(r);
         return {
@@ -118,7 +121,8 @@ async function captureWbBalance(cabinet: Cabinet): Promise<WbBalance> {
     const res = await wbJson<{ currency?: string; current?: number; for_withdraw?: number }>(cabinet, 'finance', {
         path: '/api/v1/account/balance'
     });
-    return { currency: res?.currency ?? 'RUB', current: res?.current ?? 0, forWithdraw: res?.for_withdraw ?? 0 };
+    if (typeof res?.current !== 'number') throw new Error('WB вернул баланс без поля current');
+    return { currency: res.currency ?? 'RUB', current: res.current, forWithdraw: res.for_withdraw ?? 0 };
 }
 
 /**
@@ -183,6 +187,7 @@ async function captureOzonStock(cabinet: OzonCabinet): Promise<OzonStockItem[]> 
             });
         }
     }
+    if (skus.length > 0 && out.length === 0) throw new Error('Ozon не вернул ни одной строки остатков');
     return out;
 }
 
@@ -254,13 +259,17 @@ export async function takeDueSnapshots(at = new Date()): Promise<void> {
     running = true;
     const day = mskDay(at);
     try {
-        for (const cabinet of config.cabinets.all()) {
-            if (!cabinet.dataToken) continue;
+        const wb = config.cabinets.all().filter(c => c.dataToken);
+        // Баланс — первым по всем кабинетам: он меняется каждую минуту, а отчёт
+        // об остатках готовится долго и отодвинул бы снимок баланса от полуночи.
+        for (const cabinet of wb) {
+            await once('wb_balance', cabinet.slug, day, async () => ({ rows: 1, data: await captureWbBalance(cabinet) }));
+        }
+        for (const cabinet of wb) {
             await once('wb_stock', cabinet.slug, day, async () => {
                 const data = await captureWbStock(cabinet);
                 return { rows: data.length, data };
             });
-            await once('wb_balance', cabinet.slug, day, async () => ({ rows: 1, data: await captureWbBalance(cabinet) }));
         }
         for (const cabinet of config.ozon) {
             await once('ozon_stock', cabinet.slug, day, async () => {
