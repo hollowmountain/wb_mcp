@@ -133,6 +133,25 @@ const dateArg = (what: string) =>
     z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Дата в виде 2026-09-01').describe(what);
 
 /**
+ * Есть ли такая дата в календаре. Формат 2026-04-31 проходит регулярку, а
+ * Date.parse молча превращает его в 1 мая — и человек получил бы чужой период.
+ */
+function isRealDate(v: string): boolean {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+    if (!m) return false;
+    const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+    return d.toISOString().slice(0, 10) === v;
+}
+
+/** Ошибка в периоде — текстом для человека, или null, если всё в порядке. */
+function periodError(from: string, to: string): string | null {
+    for (const [name, v] of [['dateFrom', from], ['dateTo', to]] as const) {
+        if (!isRealDate(v)) return `${name}: даты «${v}» нет в календаре. Нужна дата вида 2026-08-31.`;
+    }
+    return from > to ? `Начало периода ${from} позже конца ${to}.` : null;
+}
+
+/**
  * Как overCabinets, но кабинеты опрашиваются по очереди. Нужно там, где Ozon
  * особенно скуп на частоту: у аналитики третий запрос подряд уже ловит 429,
  * а три кабинета разом — это ровно три запроса.
@@ -342,8 +361,14 @@ function noSkuLine(agg: AccrualAggregate, types: Map<number, AccrualType>): stri
 // `|| 0` — чтобы нулевой расход не печатался как «−0,00».
 const spendK = (rub: number): string => rubK(-Math.round(rub * 100) || 0);
 
-async function adsBySkuReport(cab: OzonCabinet, from: string, to: string, offset: number, limit: number, maxBytes: number): Promise<string> {
-    const s = await adSpendBySku(cab, from, to);
+async function adsBySkuReport(
+    cab: OzonCabinet,
+    from: string,
+    to: string,
+    page: { offset: number; limit: number; maxBytes: number; refresh: boolean }
+): Promise<string> {
+    const { offset, limit, maxBytes } = page;
+    const s = await adSpendBySku(cab, from, to, page.refresh);
     // Артикулы — из Seller API того же кабинета; без них SKU всё равно показана.
     const skus = await resolveSkus(cab, s.lines.map(l => Number(l.sku))).catch((): AccrualAggregate['skus'] => ({}));
     const click = s.lines.reduce((a, l) => a + l.click, 0);
@@ -785,10 +810,12 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('ozon_accruals', async (args, extra) => {
+            const wrong = periodError(args.dateFrom, args.dateTo);
+            if (wrong) return text(wrong);
             const todayMsk = new Date(Date.now() + 3 * 3_600_000).toISOString().slice(0, 10);
             const from = args.dateFrom;
             const to = args.dateTo > todayMsk ? todayMsk : args.dateTo;
-            if (from > to) return text(`Начало периода ${from} позже конца ${to}.`);
+            if (from > to) return text(`Начало периода ${from} ещё не наступило: сегодня ${todayMsk}.`);
             const days = (Date.parse(to) - Date.parse(from)) / 86_400_000 + 1;
             if (days > 366) return text('Период длиннее 12 месяцев. Возьмите год или меньше: отчёт «3 Формы» — помесячный.');
             const groupBy = args.groupBy ?? 'type';
@@ -1032,6 +1059,10 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                     .optional()
                     .describe('campaign — по кампаниям (по умолчанию), sku — расход по товарам и инструменту'),
                 offset: z.number().int().min(0).optional().describe('Для groupBy=sku: с какой строки показывать, по умолчанию 0'),
+                refresh: z
+                    .boolean()
+                    .optional()
+                    .describe('Для groupBy=sku: построить отчёты заново мимо кэша закрытых периодов. Нужно редко.'),
                 limit: z
                     .number()
                     .int()
@@ -1043,6 +1074,11 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
             annotations: { readOnlyHint: true, openWorldHint: true }
         },
         guarded('ozon_ads', async (args, extra) => {
+            // Даты сверяем по первым десяти знакам: прежде принимались и ISO-строки со временем.
+            const from = args.dateFrom.slice(0, 10);
+            const to = args.dateTo.slice(0, 10);
+            const wrong = periodError(from, to);
+            if (wrong) return text(wrong);
             const cabs = resolve(actorOf(extra), args.cabinet);
             const withPerf = cabs.filter(hasPerf);
             if (withPerf.length === 0) {
@@ -1060,7 +1096,12 @@ export function registerOzonTools(server: McpServer, actor: Actor): void {
                 for (const cab of withPerf) {
                     try {
                         out.push(
-                            await adsBySkuReport(cab, args.dateFrom.slice(0, 10), args.dateTo.slice(0, 10), args.offset ?? 0, args.limit ?? 200, Math.floor(MAX_BYTES / withPerf.length))
+                            await adsBySkuReport(cab, from, to, {
+                                offset: args.offset ?? 0,
+                                limit: args.limit ?? 200,
+                                maxBytes: Math.floor(MAX_BYTES / withPerf.length),
+                                refresh: args.refresh === true
+                            })
                         );
                     } catch (e) {
                         failed++;

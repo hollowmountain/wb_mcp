@@ -301,9 +301,15 @@ const MAX_PAGES_PER_DAY = 50;
  */
 const PARALLEL_DAYS = 4;
 
-async function fetchDay(cabinet: OzonCabinet, date: string, acc: Acc): Promise<void> {
+/** Общий стоп для параллельных потоков: упал один день — остальные больше не шлют запросов. */
+interface Stop {
+    stopped: boolean;
+}
+
+async function fetchDay(cabinet: OzonCabinet, date: string, acc: Acc, stop: Stop): Promise<void> {
     let lastId = '';
     for (let page = 0; page < MAX_PAGES_PER_DAY; page++) {
+        if (stop.stopped) return;
         const raw = await retryOn429(
             () =>
                 post<{ accruals?: RawAccrual[]; last_id?: string }>(
@@ -332,10 +338,18 @@ async function fetchRange(cabinet: OzonCabinet, from: string, to: string): Promi
     const acc = new Acc();
     const days = daysOf(from, to);
     let next = 0;
+    // Без общего стопа Promise.all отдал бы ошибку сразу, а три других потока
+    // продолжали бы качать месяц впустую и тратить лимит запросов кабинета.
+    const stop: Stop = { stopped: false };
     const worker = async (): Promise<void> => {
-        while (next < days.length) {
+        while (!stop.stopped && next < days.length) {
             const date = days[next++]!;
-            await fetchDay(cabinet, date, acc);
+            try {
+                await fetchDay(cabinet, date, acc, stop);
+            } catch (e) {
+                stop.stopped = true;
+                throw e;
+            }
         }
     };
     await Promise.all(Array.from({ length: Math.min(PARALLEL_DAYS, days.length) }, worker));
@@ -413,6 +427,13 @@ CREATE TABLE IF NOT EXISTS ozon_accruals_month (
 
 const CLOSE_AFTER_DAYS = 10;
 
+/**
+ * Версия формата записи кэша. Поменялся разбор начислений или состав
+ * AccrualAggregate — увеличьте: старые записи тогда не читаются, а
+ * перекачиваются, и месяц, разобранный по-старому, не выдаётся за новый.
+ */
+const CACHE_FORMAT = 1;
+
 /** Последний день месяца YYYY-MM. */
 const monthEnd = (month: string): string => {
     const [y, m] = month.split('-').map(Number) as [number, number];
@@ -431,8 +452,10 @@ function readMonth(cabinet: string, month: string): { agg: AccrualAggregate; fet
         | undefined;
     if (!row) return null;
     try {
-        const agg = JSON.parse(inflateSync(row.data).toString('utf8')) as AccrualAggregate;
-        return { agg, fetchedAt: row.fetched_at };
+        const rec = JSON.parse(inflateSync(row.data).toString('utf8')) as { v?: number; agg?: AccrualAggregate };
+        // Запись старого формата (или без версии) не читаем — перекачаем.
+        if (rec.v !== CACHE_FORMAT || !rec.agg) return null;
+        return { agg: rec.agg, fetchedAt: row.fetched_at };
     } catch {
         return null; // битая запись — перекачаем
     }
@@ -444,12 +467,24 @@ function writeMonth(cabinet: string, month: string, agg: AccrualAggregate): void
     db.prepare(
         'INSERT INTO ozon_accruals_month (cabinet, month, fetched_at, data) VALUES (?, ?, ?, ?) ' +
             'ON CONFLICT(cabinet, month) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data'
-    ).run(cabinet, month, Math.floor(Date.now() / 1000), deflateSync(Buffer.from(JSON.stringify(slim)), { level: 9 }));
+    ).run(cabinet, month, Math.floor(Date.now() / 1000), deflateSync(Buffer.from(JSON.stringify({ v: CACHE_FORMAT, agg: slim })), { level: 9 }));
 }
 
 /** Свежие (незакрытые) окна держим в памяти полчаса: повторный вызов в том же разговоре не качает заново. */
 const LIVE_TTL_MS = 30 * 60 * 1000;
+/** Потолок записей: окна бывают произвольными, и без него память сервера росла бы с каждым новым периодом. */
+const LIVE_MAX = 50;
 const liveCache = new Map<string, { at: number; agg: AccrualAggregate }>();
+
+/** Кладём окно в память, по дороге выбрасывая просроченные и самые старые записи. */
+function rememberLive(key: string, agg: AccrualAggregate): void {
+    const now = Date.now();
+    for (const [k, v] of liveCache) if (now - v.at >= LIVE_TTL_MS) liveCache.delete(k);
+    liveCache.delete(key);
+    // Map помнит порядок вставки: первой идёт самая старая запись.
+    while (liveCache.size >= LIVE_MAX) liveCache.delete(liveCache.keys().next().value!);
+    liveCache.set(key, { at: now, agg });
+}
 
 /** Окна по календарным месяцам: [from, to, month, целый ли месяц]. */
 export function monthWindows(from: string, to: string): Array<{ from: string; to: string; month: string; whole: boolean }> {
@@ -485,7 +520,7 @@ async function windowAggregate(
     const skus = await resolveSkus(cabinet, skuList);
     const agg = acc.result(w.from, w.to, skus, []);
     if (closed) writeMonth(cabinet.slug, w.month, agg);
-    else liveCache.set(liveKey, { at: Date.now(), agg });
+    else rememberLive(liveKey, agg);
     return { agg };
 }
 
