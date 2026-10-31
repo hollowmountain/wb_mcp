@@ -339,7 +339,8 @@ function noSkuLine(agg: AccrualAggregate, types: Map<number, AccrualType>): stri
 // ─── Реклама по товарам ──────────────────────────────────────────────────────
 
 /** Рубли со знаком минус: расход в разрезе SKU пишем как в начислениях. */
-const spendK = (rub: number): string => rubK(-Math.round(rub * 100));
+// `|| 0` — чтобы нулевой расход не печатался как «−0,00».
+const spendK = (rub: number): string => rubK(-Math.round(rub * 100) || 0);
 
 async function adsBySkuReport(cab: OzonCabinet, from: string, to: string, offset: number, limit: number, maxBytes: number): Promise<string> {
     const s = await adSpendBySku(cab, from, to);
@@ -354,7 +355,9 @@ async function adsBySkuReport(cab: OzonCabinet, from: string, to: string, offset
             (s.cachedAt ? `из кэша от ${new Date(s.cachedAt * 1000).toISOString().slice(0, 10)}` : `отчётов-заданий ${s.reports}`) +
             `, товаров ${s.lines.length}`,
         `Расход кампаний по дневной статистике: ${spendK(s.campaignSpent)} ₽`,
-        `Разложено по SKU: ${spendK(click + order)} ₽ (оплата за клик ${spendK(click)} · оплата за заказ ${spendK(order)}) · не разложено: ${spendK(loose)} ₽`,
+        `Разложено по SKU: ${spendK(click + order)} ₽ (оплата за клик ${spendK(click)} · оплата за заказ ${spendK(order)}) · ` +
+            // Отрицательный остаток — отчёт по товарам насчитал больше дневной статистики, а не «не разложил».
+            (loose >= 0 ? `не разложено: ${spendK(loose)} ₽` : `по товарам на ${spendK(loose)} ₽ больше дневной статистики`),
         'Знаки: расход с минусом, как в начислениях ozon_accruals. Суммы в ₽.',
         '',
         'артикул | SKU | оплата за клик | оплата за заказ | итого, ₽ | клики | заказы'
@@ -365,7 +368,7 @@ async function adsBySkuReport(cab: OzonCabinet, from: string, to: string, offset
             `${spendK(l.click + l.order)} | ${pcs(l.clicks)} | ${pcs(l.orders)}`
     );
     const tail = s.unallocated.length
-        ? 'Не разложено по товарам:\n' + s.unallocated.map(u => `  ${u.title}: ${spendK(u.spent)} ₽ — ${u.reason}`).join('\n')
+        ? 'Не разложено по товарам:\n' + s.unallocated.map(u => `  ${u.title}: ${u.spent >= 0 ? spendK(u.spent) : `+${spendK(u.spent)}`} ₽ — ${u.reason}`).join('\n')
         : 'Весь расход разложен по товарам.';
     return pageRows(head, rows, offset, limit, tail, maxBytes);
 }
