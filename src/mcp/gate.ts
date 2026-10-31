@@ -94,6 +94,12 @@ export const TOOL_AREAS: Record<string, Area | null> = {
     nep_economy: 'orders',
     ozon_finance: 'money',
     ozon_accruals: 'money',
+    // Финансы WB для отчёта «3 Формы»: реализация с комиссией и логистикой,
+    // хранение и реклама — это деньги юрлица, а не расход для менеджера,
+    // поэтому money, а не orders и не ads.
+    wb_realization: 'money',
+    wb_paid_storage: 'money',
+    wb_ad_spend: 'money',
     ozon_buyer_prices: 'orders',
     onec_stock_value: 'money',
     onec_money: 'money',
