@@ -370,6 +370,30 @@ function realizationText(
                         ...metricCells(x.metrics)
                     ];
                 });
+                {
+                    // На неделю у WB бывает два отчёта — основной и по выкупам, — а
+                    // финансист считает неделю целиком. Чтобы их не складывали руками,
+                    // даём сумму недели отдельным абзацем, не строкой таблицы: иначе
+                    // сумма столбца посчитала бы неделю дважды.
+                    const weeks = new Map<string, { n: number; m: Metrics }>();
+                    for (const x of list) {
+                        const r = reportById.get(x.sample.report);
+                        const week = `${r?.dateFrom ?? ''} — ${r?.dateTo ?? ''}`;
+                        const cur = weeks.get(week) ?? { n: 0, m: emptyMetrics() };
+                        cur.n++;
+                        for (const k of METRICS) cur.m[k] += x.metrics[k];
+                        weeks.set(week, cur);
+                    }
+                    if ([...weeks.values()].some(w => w.n > 1)) {
+                        const main: Metric[] = ['revenue', 'for_pay', 'commission', 'logistics', 'sales_cnt'];
+                        head.push(
+                            'По неделям, все отчёты недели вместе: ' +
+                                [...weeks.entries()]
+                                    .map(([w, x]) => `${w} (${x.n} отч.): ${main.map(k => `${k} ${fmtMetric(k, x.m[k])}`).join(', ')}`)
+                                    .join(' | ')
+                        );
+                    }
+                }
                 break;
             case 'sku':
                 list.sort((a, b) => b.metrics.revenue - a.metrics.revenue || a.sample.nmId - b.sample.nmId);
@@ -615,13 +639,14 @@ export function registerWbFinanceTools(server: McpServer, actor: Actor): void {
                 'Платное хранение на складах Wildberries за период, ₽, из отчёта WB о платном хранении (товар × склад × день). ' +
                 'Сервер сам режет период на окна по 8 дней (так требует WB), ждёт подготовки каждого и склеивает. ' +
                 'groupBy: day — по дням; week — по неделям с понедельника; sku — по товарам (nmId + артикул). ' +
-                'Хранение — расход, отдаётся с минусом; сторно хранения уже учтено. Период — по дате начисления, ' +
-                'для месяца — с 1-го по последнее число. До 93 дней. Подготовка у WB долгая: если данные не готовы, ' +
+                'Хранение — расход, отдаётся с минусом; сторно хранения уже учтено. Период — по дате начисления. ' +
+                'Финансист берёт для месяца те же недели, что и отчёты о реализации: август 2026 — 2026-08-03 … 2026-08-30 ' +
+                '(так сошлось с его файлом до рубля). До 93 дней. Подготовка у WB долгая: если данные не готовы, ' +
                 'инструмент скажет, когда повторить. Закрытый период хранится на сервере.',
             inputSchema: {
                 cabinet: cabinetArg,
-                dateFrom: dateArg('Начало периода: 2026-08-01'),
-                dateTo: dateArg('Конец периода включительно: 2026-08-31'),
+                dateFrom: dateArg('Начало периода, дата начисления: 2026-08-03'),
+                dateTo: dateArg('Конец периода включительно: 2026-08-30'),
                 groupBy: z.enum(['day', 'week', 'sku']).optional().describe('Разрез: day (по умолчанию), week, sku'),
                 offset: offsetArg,
                 limit: limitArg
